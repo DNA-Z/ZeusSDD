@@ -1,0 +1,18 @@
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: zeus
+      POSTGRES_PASSWORD: zeus
+      POSTGRES_DB: zeus
+    ports:
+      - "127.0.0.1:5434:5432"
+    volumes:
+      - zeus-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U zeus -d zeus"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+volumes:
+  zeus-postgres:

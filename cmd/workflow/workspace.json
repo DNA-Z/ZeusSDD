@@ -1,0 +1,234 @@
+{
+  "releases": [
+    {
+      "id": "2026.1128",
+      "sprint": "Zeus 26.21",
+      "current": true,
+      "tasks": [
+        {
+          "key": "ZEUS-214",
+          "title": "Подключить процедуру сверки в сервисе",
+          "status": "progress",
+          "hasSpec": true,
+          "developer": "Алексей Волков",
+          "analyst": "Мария Белова",
+          "tester": "Наталья Морозова",
+          "summary": "Подключить процедуру сверки платежей в сервисе. Передать дату расчёта, обработать результат и зафиксировать количество обработанных строк в журнале.",
+          "branch": "feature/ZEUS-214",
+          "kind": "Доработка",
+          "dependencies": [
+            {
+              "key": "ZEUS-209",
+              "condition": "Процедура сверки доступна на стенде разработки."
+            }
+          ],
+          "files": [
+            {
+              "name": "spec.md",
+              "path": "specs/ZEUS-214/spec.md",
+              "lines": [
+                [
+                  "meta",
+                  "@@ -0,0 +1,5 @@"
+                ],
+                [
+                  "add",
+                  "# Сверка платежей"
+                ],
+                [
+                  "add",
+                  ""
+                ],
+                [
+                  "add",
+                  "Сервис запускает сверку за указанную дату."
+                ],
+                [
+                  "add",
+                  "Сверка возвращает количество обработанных строк."
+                ],
+                [
+                  "add",
+                  "Повторный запуск за одну дату не создаёт дубликаты."
+                ]
+              ]
+            },
+            {
+              "name": "SettlementService.cs",
+              "path": "src/Zeus.Payments/SettlementService.cs",
+              "lines": [
+                [
+                  "meta",
+                  "@@ -24,8 +24,10 @@ public sealed class SettlementService"
+                ],
+                [
+                  "context",
+                  "    public async Task RunAsync(DateOnly date, CancellationToken ct)"
+                ],
+                [
+                  "context",
+                  "    {"
+                ],
+                [
+                  "remove",
+                  "        await repository.ReconcileAsync(date, ct);"
+                ],
+                [
+                  "add",
+                  "        var result = await repository.ReconcileAsync(date, ct);"
+                ],
+                [
+                  "add",
+                  "        logger.LogInformation(\"Сверка завершена, строк: {Count}\", result.Count);"
+                ],
+                [
+                  "context",
+                  "    }"
+                ],
+                [
+                  "context",
+                  "}"
+                ]
+              ]
+            }
+          ]
+        },
+        {
+          "key": "ZEUS-209",
+          "title": "Создать процедуру сверки платежей",
+          "status": "progress",
+          "hasSpec": false,
+          "developer": "Илья Орлов",
+          "analyst": "Мария Белова",
+          "summary": "Создать процедуру сверки и согласовать входные параметры с командой сервиса.",
+          "branch": "feature/ZEUS-209",
+          "kind": "Доработка",
+          "dependencies": [],
+          "files": []
+        },
+        {
+          "key": "ZEUS-216",
+          "title": "Сохранять результат сверки",
+          "status": "testing",
+          "hasSpec": true,
+          "developer": "Алексей Волков",
+          "analyst": "Елена Соколова",
+          "tester": "Наталья Морозова",
+          "summary": "Сохранять результаты сверки за дату расчёта.",
+          "branch": "feature/ZEUS-216",
+          "kind": "Доработка",
+          "dependencies": [],
+          "files": [
+            {
+              "name": "spec.md",
+              "path": "specs/ZEUS-216/spec.md",
+              "lines": [
+                [
+                  "meta",
+                  "@@ -0,0 +1,5 @@"
+                ],
+                [
+                  "add",
+                  "# Сверка платежей"
+                ],
+                [
+                  "add",
+                  ""
+                ],
+                [
+                  "add",
+                  "Сервис запускает сверку за указанную дату."
+                ],
+                [
+                  "add",
+                  "Сверка возвращает количество обработанных строк."
+                ],
+                [
+                  "add",
+                  "Повторный запуск за одну дату не создаёт дубликаты."
+                ]
+              ]
+            }
+          ]
+        },
+        {
+          "key": "ZEUS-218",
+          "title": "Исправить повторную обработку платежа",
+          "status": "todo",
+          "hasSpec": false,
+          "developer": "Алексей Волков",
+          "analyst": "Елена Соколова",
+          "summary": "Проверить повторную отправку одного платежа и исключить дублирование.",
+          "branch": "bugfix/ZEUS-218",
+          "kind": "Ошибка",
+          "dependencies": [],
+          "files": []
+        },
+        {
+          "key": "ZEUS-221",
+          "title": "Добавить журнал ошибок импорта",
+          "status": "todo",
+          "hasSpec": false,
+          "developer": "Илья Орлов",
+          "analyst": "Мария Белова",
+          "summary": "Вывести в журнал причины ошибок, возникающих при импорте.",
+          "branch": "feature/ZEUS-221",
+          "kind": "Доработка",
+          "dependencies": [],
+          "files": []
+        }
+      ]
+    },
+    {
+      "id": "2026.1114",
+      "sprint": "Zeus 26.20",
+      "current": false,
+      "tasks": [
+        {
+          "key": "ZEUS-202",
+          "title": "Обновить расписание сверки",
+          "status": "testing",
+          "hasSpec": true,
+          "developer": "Алексей Волков",
+          "analyst": "Мария Белова",
+          "summary": "Перенести сверку на новое время запуска.",
+          "branch": "feature/ZEUS-202",
+          "kind": "Доработка",
+          "dependencies": [],
+          "files": [
+            {
+              "name": "spec.md",
+              "path": "specs/ZEUS-202/spec.md",
+              "lines": [
+                [
+                  "meta",
+                  "@@ -0,0 +1,5 @@"
+                ],
+                [
+                  "add",
+                  "# Сверка платежей"
+                ],
+                [
+                  "add",
+                  ""
+                ],
+                [
+                  "add",
+                  "Сервис запускает сверку за указанную дату."
+                ],
+                [
+                  "add",
+                  "Сверка возвращает количество обработанных строк."
+                ],
+                [
+                  "add",
+                  "Повторный запуск за одну дату не создаёт дубликаты."
+                ]
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
