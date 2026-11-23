@@ -1,19 +1,16 @@
 package main
 
 import (
-	_ "embed"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"strings"
 	"unicode/utf8"
-)
 
-//go:embed workspace.json
-var sample json.RawMessage
+	"zeussdd/internal/workspace"
+)
 
 func writeJSON(w http.ResponseWriter, status int, value any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
@@ -29,23 +26,27 @@ func writeError(w http.ResponseWriter, status int, message string) {
 }
 
 func routes(store *messageStore) http.Handler {
-	var workspace struct {
-		Releases []struct {
-			Tasks []struct{ Key string } `json:"tasks"`
-		} `json:"releases"`
-	}
-	if err := json.Unmarshal(sample, &workspace); err != nil {
-		panic(fmt.Errorf("invalid demo workspace: %w", err))
+	state, err := workspace.Load()
+	if err != nil {
+		panic(err)
 	}
 	keys := make(map[string]bool)
-	for _, release := range workspace.Releases {
+	for _, release := range state.Releases {
 		for _, task := range release.Tasks {
 			keys[task.Key] = true
 		}
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/workspace", func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(w, http.StatusOK, sample)
+		writeJSON(w, http.StatusOK, state)
+	})
+	mux.HandleFunc("GET /api/tasks/{key}", func(w http.ResponseWriter, r *http.Request) {
+		task, release, ok := state.Task(r.PathValue("key"))
+		if !ok {
+			writeError(w, http.StatusNotFound, "Задача не найдена.")
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"task": task, "release": release})
 	})
 	mux.HandleFunc("/api/tasks/{key}/messages", func(w http.ResponseWriter, r *http.Request) {
 		key := r.PathValue("key")
