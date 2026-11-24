@@ -1,4 +1,4 @@
-package main
+package settings
 
 import (
 	"context"
@@ -38,6 +38,12 @@ func newStore(ctx context.Context, dsn string) (*store, error) {
 	}
 	state.pool = pool
 	return state, nil
+}
+
+func (s *store) close() {
+	if s.pool != nil {
+		s.pool.Close()
+	}
 }
 
 func (s *store) get(ctx context.Context, profile string) (settings, error) {

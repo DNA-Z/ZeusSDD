@@ -24,7 +24,11 @@ type InitializeResult struct {
 	ProtocolVersion   int       `json:"protocolVersion"`
 	AgentInfo         AgentInfo `json:"agentInfo"`
 	AuthMethods       []any     `json:"authMethods"`
-	AgentCapabilities any       `json:"agentCapabilities"`
+	AgentCapabilities struct {
+		MCP struct {
+			HTTP bool `json:"http"`
+		} `json:"mcpCapabilities"`
+	} `json:"agentCapabilities"`
 }
 
 type Session struct {
@@ -48,13 +52,15 @@ type Update struct {
 }
 
 type PermissionRequest struct {
-	SessionID string          `json:"sessionId"`
-	ToolCall  json.RawMessage `json:"toolCall"`
-	Options   []any           `json:"options"`
+	SessionID string             `json:"sessionId"`
+	ToolCall  json.RawMessage    `json:"toolCall"`
+	Options   []PermissionOption `json:"options"`
 }
 
-type PermissionReply struct {
-	Outcome PermissionOutcome `json:"outcome"`
+type PermissionOption struct {
+	ID   string `json:"optionId"`
+	Name string `json:"name"`
+	Kind string `json:"kind"`
 }
 
 type PermissionOutcome struct {
@@ -71,6 +77,7 @@ type Client struct {
 	writeMu  sync.Mutex
 	nextID   int
 	pending  map[int]chan rpcResult
+	readErr  error
 	mu       sync.Mutex
 	handlers Handlers
 	done     chan struct{}
@@ -79,7 +86,7 @@ type Client struct {
 type Handlers struct {
 	// OnUpdate receives every session/update notification.
 	OnUpdate func(Update)
-	// OnPermission receives permission requests; returning an error rejects.
+	// OnPermission runs independently of the reader and may wait for the user.
 	OnPermission func(PermissionRequest) PermissionOutcome
 	// OnClientRequest handles other agent-to-client requests (fs/*, terminal/*).
 	// Returning a nil value and a non-nil error sends a JSON-RPC error back.
@@ -91,12 +98,24 @@ type rpcResult struct {
 	err    *rpcErrorBody
 }
 
+func (r rpcResult) response(method string) (json.RawMessage, error) {
+	if r.err != nil {
+		return nil, fmt.Errorf("acp: %s: %w", method, r.err)
+	}
+	return r.result, nil
+}
+
 type rpcErrorBody struct {
 	Code    int    `json:"code"`
 	Message string `json:"message"`
 }
 
 func (e *rpcErrorBody) Error() string { return fmt.Sprintf("%d: %s", e.Code, e.Message) }
+
+func IsAuthRequired(err error) bool {
+	var failure *rpcErrorBody
+	return errors.As(err, &failure) && failure.Code == -32000
+}
 
 func NewClient(transport *Transport, info ClientInfo) *Client {
 	client := &Client{
@@ -139,9 +158,10 @@ func (c *Client) fail(err error) {
 	c.writeMu.Lock()
 	pending := c.pending
 	c.pending = make(map[int]chan rpcResult)
+	c.readErr = err
 	c.writeMu.Unlock()
 	for _, waiter := range pending {
-		waiter <- rpcResult{err: &rpcErrorBody{Code: -32000, Message: err.Error()}}
+		waiter <- rpcResult{err: &rpcErrorBody{Code: -32603, Message: err.Error()}}
 	}
 }
 
@@ -195,7 +215,9 @@ func (c *Client) dispatch(message map[string]any) {
 			c.replyError(id, -32602, "invalid permission request")
 			return
 		}
-		c.reply(id, handlers.OnPermission(request))
+		go func() {
+			c.reply(id, map[string]any{"outcome": handlers.OnPermission(request)})
+		}()
 	case handlers.OnClientRequest != nil:
 		go func() {
 			result, err := handlers.OnClientRequest(method, params)
@@ -221,8 +243,16 @@ func (c *Client) takePending(id int) chan rpcResult {
 	return waiter
 }
 
-func (c *Client) request(ctx context.Context, method string, params any) (json.RawMessage, error) {
+func (c *Client) request(ctx context.Context, method string, params any, sent func()) (json.RawMessage, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	c.writeMu.Lock()
+	if c.readErr != nil {
+		err := c.readErr
+		c.writeMu.Unlock()
+		return nil, err
+	}
 	c.nextID++
 	id := c.nextID
 	waiter := make(chan rpcResult, 1)
@@ -233,15 +263,20 @@ func (c *Client) request(ctx context.Context, method string, params any) (json.R
 		c.takePending(id)
 		return nil, err
 	}
+	if sent != nil {
+		sent()
+	}
 	select {
 	case result := <-waiter:
-		if result.err != nil {
-			return nil, fmt.Errorf("acp: %s: %w", method, result.err)
-		}
-		return result.result, nil
+		return result.response(method)
 	case <-ctx.Done():
 		c.takePending(id)
-		return nil, ctx.Err()
+		select {
+		case result := <-waiter:
+			return result.response(method)
+		default:
+			return nil, ctx.Err()
+		}
 	}
 }
 
@@ -264,7 +299,7 @@ func (c *Client) Initialize(ctx context.Context) (InitializeResult, error) {
 			"terminal": false,
 		},
 		"clientInfo": c.client,
-	})
+	}, nil)
 	if err != nil {
 		return InitializeResult{}, err
 	}
@@ -272,8 +307,8 @@ func (c *Client) Initialize(ctx context.Context) (InitializeResult, error) {
 	if err := json.Unmarshal(raw, &result); err != nil {
 		return InitializeResult{}, err
 	}
-	if result.AgentInfo.Name == "" {
-		return InitializeResult{}, errors.New("acp: agent returned no identity")
+	if result.ProtocolVersion != 1 {
+		return InitializeResult{}, fmt.Errorf("acp: unsupported protocol version %d", result.ProtocolVersion)
 	}
 	return result, nil
 }
@@ -282,7 +317,7 @@ func (c *Client) NewSession(ctx context.Context, cwd string, mcpServers []map[st
 	if mcpServers == nil {
 		mcpServers = []map[string]any{}
 	}
-	raw, err := c.request(ctx, "session/new", map[string]any{"cwd": cwd, "mcpServers": mcpServers})
+	raw, err := c.request(ctx, "session/new", map[string]any{"cwd": cwd, "mcpServers": mcpServers}, nil)
 	if err != nil {
 		return Session{}, err
 	}
@@ -296,11 +331,11 @@ func (c *Client) NewSession(ctx context.Context, cwd string, mcpServers []map[st
 	return session, nil
 }
 
-func (c *Client) Prompt(ctx context.Context, sessionID, text string) (PromptResult, error) {
+func (c *Client) Prompt(ctx context.Context, sessionID, text string, sent func()) (PromptResult, error) {
 	raw, err := c.request(ctx, "session/prompt", map[string]any{
 		"sessionId": sessionID,
 		"prompt":    []map[string]any{{"type": "text", "text": text}},
-	})
+	}, sent)
 	if err != nil {
 		return PromptResult{}, err
 	}
@@ -308,10 +343,13 @@ func (c *Client) Prompt(ctx context.Context, sessionID, text string) (PromptResu
 	if err := json.Unmarshal(raw, &result); err != nil {
 		return PromptResult{}, err
 	}
+	if result.StopReason == "" {
+		return PromptResult{}, errors.New("acp: agent returned no stop reason")
+	}
 	return result, nil
 }
 
-func (c *Client) Cancel(ctx context.Context, sessionID string) error {
+func (c *Client) Cancel(sessionID string) error {
 	return c.transport.Write(map[string]any{
 		"jsonrpc": "2.0",
 		"method":  "session/cancel",
@@ -319,36 +357,11 @@ func (c *Client) Cancel(ctx context.Context, sessionID string) error {
 	})
 }
 
-// SelectAllowOnce picks the least privileged approval so a client never grants
-// standing consent on the user's behalf.
-func SelectAllowOnce(options []any) PermissionOutcome {
-	chosen := ""
-	for _, raw := range options {
-		option, ok := raw.(map[string]any)
-		if !ok {
-			continue
-		}
-		kind, _ := option["kind"].(string)
-		id, _ := option["optionId"].(string)
-		if kind == "allow_once" && id != "" {
-			return PermissionOutcome{Outcome: "selected", OptionID: id}
-		}
-		if kind == "allow_always" && chosen == "" {
-			chosen = id
-		}
-	}
-	if chosen != "" {
-		return PermissionOutcome{Outcome: "selected", OptionID: chosen}
-	}
-	return PermissionOutcome{Outcome: "cancelled"}
-}
-
 func toInt(value any) (int, bool) {
-	switch number := value.(type) {
-	case float64:
-		return int(number), true
-	case int:
-		return number, true
+	number, ok := value.(json.Number)
+	if !ok {
+		return 0, false
 	}
-	return 0, false
+	integer, err := number.Int64()
+	return int(integer), err == nil && int64(int(integer)) == integer
 }

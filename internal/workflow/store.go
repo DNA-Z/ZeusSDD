@@ -1,4 +1,4 @@
-package main
+package workflow
 
 import (
 	"context"
@@ -42,6 +42,12 @@ func newMessageStore(ctx context.Context, dsn string) (*messageStore, error) {
 	}
 	store.pool = pool
 	return store, nil
+}
+
+func (s *messageStore) close() {
+	if s.pool != nil {
+		s.pool.Close()
+	}
 }
 
 func (s *messageStore) list(ctx context.Context, key string) ([]message, error) {

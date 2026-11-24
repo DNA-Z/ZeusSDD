@@ -1,10 +1,3 @@
-// Package acp launches a GigaCode agent in ACP mode with an isolated profile.
-//
-// The profile is what makes the launch safe: GigaCode resolves its global
-// settings (MCP servers, skills, extensions, permission rules) from the user's
-// home directory, so an unconstrained run would hand every one of the user's
-// integrations to the agent. GigaCodeHome points the process at a directory we
-// own, where only explicitly allowed customizations exist.
 package acp
 
 import (
@@ -17,133 +10,78 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 )
 
 type Profile struct {
-	// Home becomes GIGACODE_HOME: an isolated global-state root.
-	Home string
-	// WorkDir is where the agent works; it is also the session cwd.
-	WorkDir string
-	// AllowedMCP lists MCP servers that the isolated profile may start. Every
-	// other server from the user's real home is invisible to the agent.
-	AllowedMCP []MCPServer
-	// PermissionMode is applied as --approval-mode, e.g. "default" so the
-	// client still receives session/request_permission for each tool call.
-	PermissionMode string
-	// NodePath and EntryPoint override autodetection of the launcher.
-	NodePath   string
-	EntryPoint string
+	Home     string
+	WorkDir  string
+	Launcher string
 }
 
-type MCPServer struct {
-	Name    string
-	Command string
-	Args    []string
-	Env     map[string]string
-}
-
-// Args is the command line for the packaged launcher. --acp is stable and the
-// launcher is required: an editor must not spawn the JS entrypoint directly.
-func (p Profile) Args() []string {
-	args := []string{"--acp"}
-	if p.PermissionMode != "" {
-		args = append(args, "--approval-mode", p.PermissionMode)
-	}
-	return args
-}
-
-// Environ builds the child environment from scratch instead of inheriting the
-// caller's. Provider API keys must not reach the ACP process (backend auth
-// handles the model), and GIGACODE_HOME must point at the isolated root.
 func (p Profile) Environ() []string {
-	keep := []string{"PATH", "SYSTEMROOT", "SystemRoot", "WINDIR", "TEMP", "TMP", "HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "COMSPEC", "PATHEXT", "USERNAME"}
-	env := make([]string, 0, len(keep)+2)
+	keep := []string{"PATH", "SYSTEMROOT", "WINDIR", "TEMP", "TMP", "HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "COMSPEC", "PATHEXT", "USERNAME"}
+	env := make([]string, 0, len(keep)+1)
 	for _, name := range keep {
 		if value, ok := os.LookupEnv(name); ok {
 			env = append(env, name+"="+value)
 		}
 	}
-	return append(env, "GIGACODE_HOME="+p.Home, "GIGACODE_PACKAGE_IDENTITY="+packageIdentity)
+	return append(env, "GIGACODE_HOME="+p.Home)
 }
 
-// WriteSettings materialises the isolated profile: only the MCP servers listed
-// in AllowedMCP and explicit permission rules, nothing inherited from the user.
-func (p Profile) WriteSettings() error {
+// Prepare creates defaults once so starting a chat preserves CLI login and settings.
+func (p Profile) Prepare() error {
+	if p.Home == "" {
+		return errors.New("acp: profile directory is required")
+	}
 	if err := os.MkdirAll(p.Home, 0o700); err != nil {
 		return err
 	}
-	servers := make(map[string]any, len(p.AllowedMCP))
-	for _, server := range p.AllowedMCP {
-		entry := map[string]any{"command": server.Command, "args": server.Args}
-		if len(server.Env) > 0 {
-			pairs := make([]string, 0, len(server.Env))
-			for key, value := range server.Env {
-				pairs = append(pairs, key+"="+value)
-			}
-			entry["env"] = pairs
-		}
-		servers[server.Name] = entry
+	path := filepath.Join(p.Home, "settings.json")
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if errors.Is(err, os.ErrExist) {
+		return nil
 	}
-	settings := map[string]any{
-		"mcpServers": servers,
-		"permissions": map[string]any{
-			"ask": []string{"Bash(*)", "Write(*)", "Edit(*)"},
-			"deny": []string{
-				"Bash(git push:*)",
-				"Bash(git commit:*)",
-			},
-		},
-	}
-	body, err := json.MarshalIndent(settings, "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(p.Home, "settings.json"), append(body, '\n'), 0o600)
+	const settings = "{\n  \"permissions\": {\n    \"ask\": [\"Bash(*)\", \"Write(*)\", \"Edit(*)\"],\n    \"deny\": [\"Bash(git push:*)\", \"Bash(git commit:*)\"]\n  }\n}\n"
+	_, writeErr := io.WriteString(file, settings)
+	if err := errors.Join(writeErr, file.Close()); err != nil {
+		_ = os.Remove(path)
+		return err
+	}
+	return nil
 }
 
-const packageIdentity = "4accbf78da580a2e40cac51ea0596d42207bb1c8e156d35ddef47175a676e675"
-
-// Command builds the child process. It runs the packaged launcher (a .cmd on
-// Windows, which needs cmd.exe) rather than cli-entry.js.
 func (p Profile) Command(ctx context.Context) (*exec.Cmd, error) {
-	if p.WorkDir == "" {
-		return nil, errors.New("acp: work dir is required")
+	if !filepath.IsAbs(p.WorkDir) {
+		return nil, errors.New("acp: working directory must be absolute")
 	}
-	if p.NodePath == "" || p.EntryPoint == "" {
-		return nil, errors.New("acp: launcher node path and entry point are required")
+	launcher := p.Launcher
+	if launcher == "" {
+		launcher = "gigacode"
+	} else if !filepath.IsAbs(launcher) {
+		return nil, errors.New("acp: ZEUSSDD_GIGACODE_PATH must be an absolute path")
 	}
-	args := append([]string{p.EntryPoint}, p.Args()...)
-	command := exec.CommandContext(ctx, p.NodePath, args...)
+	path, err := exec.LookPath(launcher)
+	if err != nil {
+		return nil, fmt.Errorf("acp: find GigaCode: %w", err)
+	}
+	command, err := launcherCommand(ctx, path, p.Environ())
+	if err != nil {
+		return nil, err
+	}
 	command.Dir = p.WorkDir
-	command.Env = p.Environ()
 	return command, nil
 }
 
-// DetectLauncher resolves the packaged runtime next to the installed CLI so the
-// caller does not have to hardcode an installation path.
-func DetectLauncher(root string) (nodePath, entryPoint string, err error) {
-	nodePath = filepath.Join(root, "runtime", "node", "node.exe")
-	if runtime.GOOS != "windows" {
-		nodePath = filepath.Join(root, "runtime", "node", "bin", "node")
-	}
-	entryPoint = filepath.Join(root, "lib", "cli-entry.js")
-	for path, kind := range map[string]string{nodePath: "node", entryPoint: "cli entry"} {
-		if _, statErr := os.Stat(path); statErr != nil {
-			return "", "", fmt.Errorf("acp: %s not found at %s", kind, path)
-		}
-	}
-	return nodePath, entryPoint, nil
-}
-
-// Transport is a newline-delimited JSON-RPC connection over stdio.
 type Transport struct {
-	in     io.Writer
-	out    *bufio.Reader
-	closer io.Closer
-
+	in      io.Writer
+	out     *bufio.Reader
+	closer  io.Closer
 	writeMu sync.Mutex
 }
 
@@ -156,20 +94,40 @@ func (p Profile) Open(ctx context.Context) (*Transport, <-chan error, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	stdout, err := command.StdoutPipe()
+	stdout, childStdout, err := os.Pipe()
 	if err != nil {
+		_ = stdin.Close()
 		return nil, nil, err
 	}
+	command.Stdout = childStdout
 	command.Stderr = os.Stderr
-	if err := command.Start(); err != nil {
+	dispose, err := startLauncher(command)
+	_ = childStdout.Close()
+	if err != nil {
+		_ = stdin.Close()
+		_ = stdout.Close()
 		return nil, nil, fmt.Errorf("acp: start agent: %w", err)
 	}
 	exited := make(chan error, 1)
 	go func() {
-		exited <- command.Wait()
+		err := command.Wait()
+		dispose()
+		exited <- err
 		close(exited)
 	}()
-	return &Transport{in: stdin, out: bufio.NewReaderSize(stdout, 1<<20), closer: stdin}, exited, nil
+	return &Transport{
+		in: stdin, out: bufio.NewReader(stdout),
+		closer: closeTransport{stdin, stdout},
+	}, exited, nil
+}
+
+type closeTransport struct {
+	stdin  io.Closer
+	stdout io.Closer
+}
+
+func (p closeTransport) Close() error {
+	return errors.Join(p.stdin.Close(), p.stdout.Close())
 }
 
 func (t *Transport) Write(message any) error {
@@ -183,41 +141,20 @@ func (t *Transport) Write(message any) error {
 	return err
 }
 
-// Read returns the next JSON-RPC message. Lines that are not JSON come from the
-// agent's own diagnostics and are skipped rather than treated as protocol
-// errors, which keeps a noisy stderr-free run from killing the session.
+// Read tolerates startup diagnostics emitted by CLI wrappers before JSON-RPC.
 func (t *Transport) Read() (map[string]any, error) {
 	for {
 		line, err := t.out.ReadString('\n')
+		var message map[string]any
+		decoder := json.NewDecoder(strings.NewReader(line))
+		decoder.UseNumber()
+		if decoder.Decode(&message) == nil && message["jsonrpc"] == "2.0" && decoder.Decode(new(any)) == io.EOF {
+			return message, nil
+		}
 		if err != nil {
-			if strings.TrimSpace(line) != "" {
-				if message, decodeErr := decodeMessage(line); decodeErr == nil {
-					return message, nil
-				}
-			}
 			return nil, err
 		}
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		message, err := decodeMessage(line)
-		if err != nil {
-			continue
-		}
-		return message, nil
 	}
-}
-
-func decodeMessage(line string) (map[string]any, error) {
-	var message map[string]any
-	if err := json.Unmarshal([]byte(line), &message); err != nil {
-		return nil, err
-	}
-	if message["jsonrpc"] == nil {
-		return nil, errors.New("not a json-rpc message")
-	}
-	return message, nil
 }
 
 func (t *Transport) Close() error {
@@ -225,4 +162,10 @@ func (t *Transport) Close() error {
 		return nil
 	}
 	return t.closer.Close()
+}
+
+func directCommand(ctx context.Context, path string, env []string) *exec.Cmd {
+	command := exec.CommandContext(ctx, path, "--acp", "--approval-mode", "default")
+	command.Env = env
+	return command
 }

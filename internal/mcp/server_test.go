@@ -1,4 +1,4 @@
-package main
+package mcp
 
 import (
 	"encoding/json"
@@ -20,7 +20,7 @@ func call(t *testing.T, handler http.Handler, body string) (int, map[string]any)
 }
 
 func TestInitializeAndListTools(t *testing.T) {
-	handler := newServer("http://127.0.0.1:1")
+	handler := NewServer("http://127.0.0.1:1")
 	code, response := call(t, handler, `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`)
 	if code != http.StatusOK || response["error"] != nil {
 		t.Fatalf("initialize failed: %d %v", code, response)
@@ -44,7 +44,7 @@ func TestInitializeAndListTools(t *testing.T) {
 }
 
 func TestNotificationIsAccepted(t *testing.T) {
-	handler := newServer("http://127.0.0.1:1")
+	handler := NewServer("http://127.0.0.1:1")
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(`{"jsonrpc":"2.0","method":"notifications/initialized"}`)))
 	if recorder.Code != http.StatusAccepted {
@@ -53,7 +53,7 @@ func TestNotificationIsAccepted(t *testing.T) {
 }
 
 func TestUnknownMethod(t *testing.T) {
-	handler := newServer("http://127.0.0.1:1")
+	handler := NewServer("http://127.0.0.1:1")
 	_, response := call(t, handler, `{"jsonrpc":"2.0","id":3,"method":"resources/list"}`)
 	failure, ok := response["error"].(map[string]any)
 	if !ok || failure["code"].(float64) != -32601 {
@@ -62,13 +62,13 @@ func TestUnknownMethod(t *testing.T) {
 }
 
 func TestToolsReadWorkflow(t *testing.T) {
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	upstream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
 		case "/api/workspace":
 			_, _ = w.Write([]byte(`{"releases":[{"id":"2026.1128","tasks":[{"key":"ZEUS-214","title":"Сверка","status":"progress","branch":"feature/ZEUS-214","files":[{},{}]}]}]}`))
 		case "/api/tasks/ZEUS-214":
-			_, _ = w.Write([]byte(`{"task":{"key":"ZEUS-214","title":"Сверка","status":"progress","branch":"feature/ZEUS-214","summary":"Подключить сверку.","files":[{"path":"spec.md","lines":[["add","+# Сверка"]]}]},"release":{"id":"2026.1128"}}`))
+			_, _ = w.Write([]byte(`{"task":{"key":"ZEUS-214","title":"Сверка","status":"progress","branch":"feature/ZEUS-214","summary":"Подключить сверку.","files":[{"path":"spec.md","lines":[["add","# Сверка"]]}]},"release":{"id":"2026.1128"}}`))
 		case "/api/tasks/ZEUS-214/messages":
 			if r.Method == http.MethodPost {
 				w.WriteHeader(http.StatusCreated)
@@ -82,9 +82,9 @@ func TestToolsReadWorkflow(t *testing.T) {
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
-	}))
-	defer upstream.Close()
-	handler := newServer(upstream.URL)
+	})
+	handler := NewServer("http://workflow.test")
+	handler.workflow.Transport = workflowTransport{upstream}
 
 	_, response := call(t, handler, `{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"list_tasks","arguments":{}}}`)
 	if got := toolText(t, response); !strings.Contains(got, "ZEUS-214") || !strings.Contains(got, "в работе") {
@@ -113,6 +113,16 @@ func TestToolsReadWorkflow(t *testing.T) {
 	}
 }
 
+type workflowTransport struct {
+	http.Handler
+}
+
+func (t workflowTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	recorder := httptest.NewRecorder()
+	t.ServeHTTP(recorder, request)
+	return recorder.Result(), nil
+}
+
 func TestToolsRejectBadInput(t *testing.T) {
 	cases := []string{
 		`{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"get_task","arguments":{}}}`,
@@ -120,7 +130,7 @@ func TestToolsRejectBadInput(t *testing.T) {
 		`{"jsonrpc":"2.0","id":11,"method":"tools/call","params":{"name":"unknown","arguments":{"key":"ZEUS-214"}}}`,
 	}
 	for _, body := range cases {
-		_, response := call(t, newServer("http://127.0.0.1:1"), body)
+		_, response := call(t, NewServer("http://127.0.0.1:1"), body)
 		if _, ok := response["error"].(map[string]any); !ok {
 			if result, ok := response["result"].(map[string]any); !ok || result["isError"] != true {
 				t.Fatalf("expected rejection for %s, got %v", body, response)
@@ -130,7 +140,7 @@ func TestToolsRejectBadInput(t *testing.T) {
 }
 
 func TestWorkflowUnavailable(t *testing.T) {
-	_, response := call(t, newServer("http://127.0.0.1:1"), `{"jsonrpc":"2.0","id":12,"method":"tools/call","params":{"name":"list_tasks","arguments":{}}}`)
+	_, response := call(t, NewServer("http://127.0.0.1:1"), `{"jsonrpc":"2.0","id":12,"method":"tools/call","params":{"name":"list_tasks","arguments":{}}}`)
 	result := response["result"].(map[string]any)
 	if result["isError"] != true || !strings.Contains(toolText(t, response), "недоступен") {
 		t.Fatalf("expected unavailable error, got %v", result)
@@ -139,7 +149,7 @@ func TestWorkflowUnavailable(t *testing.T) {
 
 func TestGETRejected(t *testing.T) {
 	recorder := httptest.NewRecorder()
-	newServer("http://127.0.0.1:1").ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/mcp", nil))
+	NewServer("http://127.0.0.1:1").ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/mcp", nil))
 	if recorder.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("expected 405 for GET, got %d", recorder.Code)
 	}

@@ -45,18 +45,18 @@ Gateway по умолчанию слушает `127.0.0.1:8080`. Он напра
 
 В прототипе используются вымышленные задачи и локальные чаты без LLM. Корпоративная авторизация, роли и интеграции с Jira, Bitbucket пока не подключены. Мерж и ПСИ выполняются вручную.
 
-## Агент в GigaCode через MCP
+## MCP для GigaCode CLI
 
-Сервис `cmd/mcp` отдаёт задачи и чаты ZeusSDD инструментами [Model Context Protocol](https://modelcontextprotocol.io). Модель и агентский цикл остаются на стороне GigaCode, приложение только предоставляет данные из Workflow по HTTP.
+ACP-мост отдаёт задачи и чаты ZeusSDD инструментами [Model Context Protocol](https://modelcontextprotocol.io). Этот эндпоинт используют вкладка **GigaCode** в чате задачи и отдельно запущенный GigaCode CLI.
 
-Запустите Workflow, затем MCP-сервис:
+Запустите Workflow и ACP-мост в отдельных терминалах:
 
 ```powershell
 go run ./cmd/workflow
-go run ./cmd/mcp
+go run ./cmd/bridge
 ```
 
-Сервис слушает `127.0.0.1:8084` и отвечает на `POST /mcp` (streamable HTTP, JSON-RPC 2.0). Адрес Workflow задаётся переменной `WORKFLOW_URL`, адрес сервиса — `MCP_ADDR`.
+Мост по умолчанию слушает `127.0.0.1:8085` и принимает локальные запросы `POST /mcp` (Streamable HTTP, JSON-RPC 2.0). Адрес моста задаётся переменной `BRIDGE_ADDR`, адрес Workflow — переменной `WORKFLOW_URL`.
 
 Инструменты:
 
@@ -68,7 +68,7 @@ go run ./cmd/mcp
 Подключение к GigaCode в текущем проекте:
 
 ```powershell
-gigacode mcp add --scope project --transport http zeussdd http://127.0.0.1:8084/mcp
+gigacode mcp add --scope project --transport http zeussdd http://127.0.0.1:8085/mcp
 ```
 
 Или вручную в `.gigacode/settings.json`:
@@ -77,7 +77,7 @@ gigacode mcp add --scope project --transport http zeussdd http://127.0.0.1:8084/
 {
   "mcpServers": {
     "zeussdd": {
-      "httpUrl": "http://127.0.0.1:8084/mcp",
+      "httpUrl": "http://127.0.0.1:8085/mcp",
       "timeout": 30000
     }
   }
@@ -88,23 +88,37 @@ gigacode mcp add --scope project --transport http zeussdd http://127.0.0.1:8084/
 
 ## Агент в чате задачи через ACP
 
-`cmd/bridge` запускает GigaCode как агента по [Agent Client Protocol](https://agentclientprotocol.com) (`gigacode --acp`, stdio) и отдаёт браузеру HTTP-API со стримом событий через Server-Sent Events. Модель, инструменты и агентский цикл остаются внутри GigaCode; мост только передаёт промпты и публикует `session/update`.
+Запустите Workflow, Settings и Gateway как описано выше. В отдельном PowerShell запустите мост. Если `gigacode` доступен в `PATH`, строка с `ZEUSSDD_GIGACODE_PATH` не нужна.
 
 ```powershell
+$env:ZEUSSDD_GIGACODE_PATH = 'C:\путь с пробелами\gigacode.cmd'
 go run ./cmd/bridge
 ```
 
-Переменные окружения: `BRIDGE_ADDR` (по умолчанию `127.0.0.1:8085`), `ACP_HOME` (изолированный корень состояния GigaCode), `ACP_WORKDIR` (рабочая папка агента), `GIGACODE_ROOT` (каталог установки, по умолчанию `%ProgramFiles%\GigaCode`), `MCP_URL` (адрес `cmd/mcp`, подключается как единственный разрешённый MCP-сервер).
+Откройте задачу в ZeusSDD, выберите **GigaCode** рядом с **Команда** и отправьте запрос. Первый запрос передаёт ключ, название, описание и ветку задачи. Ответ появляется по мере поступления. В чате можно остановить ответ или выбрать вариант разрешения, предложенный GigaCode. При переходе к другой задаче сессия закрывается.
 
-Ручки:
+Мост запускает `gigacode --acp` и общается с ним по [Agent Client Protocol](https://agentclientprotocol.com/protocol/v1/transports) через `stdin` и `stdout`. Браузер получает события через Gateway по SSE. Для ZeusSDD ключ к API модели не требуется.
+
+При открытии ACP-сессии мост передаёт GigaCode адрес MCP-сервера `zeussdd` в параметре `mcpServers`.
+
+| Переменная | Назначение |
+|---|---|
+| `ZEUSSDD_GIGACODE_PATH` | Полный путь к CLI. По умолчанию используется `gigacode` из `PATH`. |
+| `BRIDGE_ADDR` | Адрес моста, по умолчанию `127.0.0.1:8085`. |
+| `BRIDGE_URL` | Адрес моста для Gateway, по умолчанию `http://127.0.0.1:8085`. |
+| `ACP_HOME` | Отдельный каталог состояния GigaCode, по умолчанию `%APPDATA%\ZeusSDD\gigacode` в Windows. |
+| `ACP_WORKDIR` | Рабочий каталог агента, по умолчанию текущий каталог процесса моста. |
+| `WORKFLOW_URL` | Адрес Workflow для встроенного MCP, по умолчанию `http://127.0.0.1:8081`. |
+| `MCP_URL` | Адрес внешнего MCP-сервера для ACP-сессий. При заданном адресе мост отключает встроенный эндпоинт. |
+
+Если GigaCode запросит вход, запустите его в терминале с `GIGACODE_HOME`, равным `ACP_HOME` моста, и выполните обычный вход в CLI. Мост сохраняет настройки существующего профиля между сессиями. GigaCode также может загружать настройки из рабочего каталога, указанного в `ACP_WORKDIR`.
 
 | Метод | Путь | Назначение |
 |---|---|---|
-| `GET` | `/api/acp/health` | число открытых сессий и путь профиля |
-| `POST` | `/api/acp/sessions` | запустить агента, получить `sessionId` и режимы |
-| `POST` | `/api/acp/sessions/{id}/prompt` | отправить промпт, дождаться `stopReason` |
-| `POST` | `/api/acp/sessions/{id}/cancel` | отменить текущий ход |
-| `GET` | `/api/acp/sessions/{id}/events` | поток событий SSE (`update`, `permission`, `closed`) |
-
-Изоляция профиля обязательна: GigaCode читает MCP-серверы, скиллы и правила разрешений из `~/.gigacode`, и без переопределения `GIGACODE_HOME` агент получил бы все интеграции пользователя — включая корпоративные. Мост создаёт отдельный профиль, где перечислены только разрешённые MCP-серверы, а `git push` и `git commit` запрещены.
-
+| `GET` | `/api/acp/health` | Число открытых сессий и путь профиля. |
+| `POST` | `/api/acp/sessions` | Открыть сессию. Тело `{ "taskKey": "ZEUS-214" }` привязывает контекст к задаче. |
+| `POST` | `/api/acp/sessions/{id}/prompt` | Отправить `{ "text": "…" }` и дождаться `stopReason`. |
+| `POST` | `/api/acp/sessions/{id}/cancel` | Остановить текущий ответ. |
+| `GET` | `/api/acp/sessions/{id}/events` | Поток SSE с поддержкой `Last-Event-ID`. |
+| `POST` | `/api/acp/sessions/{id}/permissions` | Передать `{ "id": "…", "optionId": "…" }`. Пустой `optionId` отменяет запрос. |
+| `DELETE` | `/api/acp/sessions/{id}` | Закрыть сессию и завершить процесс. |

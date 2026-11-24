@@ -20,6 +20,7 @@ func fakeAgent(t *testing.T, toClient net.Conn, fromClient *bufio.Reader) {
 			return
 		}
 	}
+	var promptID json.RawMessage
 	for {
 		line, err := fromClient.ReadString('\n')
 		if err != nil {
@@ -36,6 +37,7 @@ func fakeAgent(t *testing.T, toClient net.Conn, fromClient *bufio.Reader) {
 				outcome, _ := result["outcome"].(map[string]any)
 				if outcome["optionId"] == "once" {
 					write(`{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s-1","update":{"sessionUpdate":"tool_call","title":"approved"}}}`)
+					write(`{"jsonrpc":"2.0","id":` + string(promptID) + `,"result":{"stopReason":"end_turn"}}`)
 				}
 			}
 			continue
@@ -47,6 +49,7 @@ func fakeAgent(t *testing.T, toClient net.Conn, fromClient *bufio.Reader) {
 		case "session/new":
 			write(`{"jsonrpc":"2.0","id":` + string(rawID) + `,"result":{"sessionId":"s-1","modes":{"currentModeId":"default","availableModes":[{"id":"plan","name":"Plan"},{"id":"default","name":"Default"}]}}}`)
 		case "session/prompt":
+			promptID = rawID
 			write(`{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s-1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"ОК"}}}}`)
 			write(`{"jsonrpc":"2.0","id":"perm","method":"session/request_permission","params":{"sessionId":"s-1","options":[{"optionId":"always","kind":"allow_always"},{"optionId":"once","kind":"allow_once"}]}}`)
 		case "session/cancel":
@@ -68,7 +71,7 @@ func newPipeTransport(t *testing.T) (*Transport, net.Conn) {
 func TestClientHandshakeAndHandlers(t *testing.T) {
 	transport, _ := newPipeTransport(t)
 	client := NewClient(transport, ClientInfo{Name: "test", Version: "0"})
-	client.Close()
+	t.Cleanup(func() { _ = client.Close() })
 
 	updates := make(chan string, 16)
 	approvals := make(chan string, 1)
@@ -77,7 +80,7 @@ func TestClientHandshakeAndHandlers(t *testing.T) {
 			updates <- string(update.Update)
 		},
 		OnPermission: func(request PermissionRequest) PermissionOutcome {
-			reply := SelectAllowOnce(request.Options)
+			reply := PermissionOutcome{Outcome: "selected", OptionID: request.Options[1].ID}
 			approvals <- reply.OptionID
 			return reply
 		},
@@ -102,7 +105,7 @@ func TestClientHandshakeAndHandlers(t *testing.T) {
 		t.Fatalf("unexpected session: %+v", session)
 	}
 
-	result, err := client.Prompt(ctx, session.SessionID, "Привет")
+	result, err := client.Prompt(ctx, session.SessionID, "Привет", nil)
 	if err != nil {
 		t.Fatalf("prompt: %v", err)
 	}
@@ -150,7 +153,7 @@ func TestClientSurfacesAgentErrors(t *testing.T) {
 	}()
 	transport := &Transport{in: clientSide, out: bufio.NewReader(clientSide), closer: clientSide}
 	client := NewClient(transport, ClientInfo{Name: "test", Version: "0"})
-	client.Close()
+	t.Cleanup(func() { _ = client.Close() })
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

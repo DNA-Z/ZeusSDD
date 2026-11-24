@@ -2,7 +2,10 @@ module zeussdd
 
 go 1.25.0
 
-require github.com/jackc/pgx/v5 v5.7.6
+require (
+	github.com/jackc/pgx/v5 v5.7.6
+	golang.org/x/sys v0.32.0
+)
 
 require (
 	github.com/jackc/pgpassfile v1.0.0 // indirect

@@ -1,22 +1,21 @@
-package main
+package gateway
 
 import (
+	"fmt"
 	"log"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
-	"os"
 	"strconv"
+	"time"
+
+	"zeussdd/internal/localhttp"
 )
 
-func upstreamProxy(env, fallback, unavailable string) http.Handler {
-	upstream := os.Getenv(env)
-	if upstream == "" {
-		upstream = fallback
-	}
+func upstreamProxy(env, upstream, unavailable string) (http.Handler, error) {
 	target, err := url.Parse(upstream)
 	if err != nil || target.Host == "" || (target.Scheme != "http" && target.Scheme != "https") {
-		log.Fatalf("invalid %s", env)
+		return nil, fmt.Errorf("invalid %s", env)
 	}
 	proxy := httputil.NewSingleHostReverseProxy(target)
 	proxy.ErrorHandler = func(w http.ResponseWriter, _ *http.Request, err error) {
@@ -25,13 +24,18 @@ func upstreamProxy(env, fallback, unavailable string) http.Handler {
 		w.WriteHeader(http.StatusBadGateway)
 		_, _ = w.Write([]byte(`{"error":` + strconv.Quote(unavailable) + `}`))
 	}
-	return proxy
+	return proxy, nil
 }
 
-func routes() http.Handler {
+func routes(settings, workflow, acp http.Handler) http.Handler {
 	mux := http.NewServeMux()
-	mux.Handle("/api/settings", upstreamProxy("SETTINGS_URL", "http://127.0.0.1:8083", "Сервис настроек недоступен."))
-	mux.Handle("/api/", upstreamProxy("WORKFLOW_URL", "http://127.0.0.1:8081", "Сервис задач недоступен."))
+	mux.Handle("/api/settings", settings)
+	mux.Handle("/api/acp/", localhttp.Only(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Prompts and SSE can outlive the Gateway's normal HTTP write timeout.
+		_ = http.NewResponseController(w).SetWriteDeadline(time.Time{})
+		acp.ServeHTTP(w, r)
+	})))
+	mux.Handle("/api/", workflow)
 	mux.Handle("/", http.FileServer(http.Dir("frontend/dist")))
 	return mux
 }

@@ -1,4 +1,4 @@
-package main
+package workflow
 
 import (
 	"encoding/json"
@@ -25,11 +25,7 @@ func writeError(w http.ResponseWriter, status int, message string) {
 	writeJSON(w, status, map[string]string{"error": message})
 }
 
-func routes(store *messageStore) http.Handler {
-	state, err := workspace.Load()
-	if err != nil {
-		panic(err)
-	}
+func routes(state workspace.Workspace, store *messageStore) http.Handler {
 	keys := make(map[string]bool)
 	for _, release := range state.Releases {
 		for _, task := range release.Tasks {

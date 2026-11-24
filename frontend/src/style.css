@@ -97,6 +97,9 @@ button.folder-button:hover, .icon-button:hover { background: #262a32; }
 .text-button:hover { color: #ffe4ba; }
 .dependency p { color: #c3b7a8; margin-top: 3px; font-size: 13px; }
 .conversation { flex: 1; min-height: 130px; padding: 24px clamp(20px, 3.1vw, 46px); overflow: auto; }
+.chat-switch { display: flex; gap: 8px; padding: 12px clamp(20px, 3.1vw, 46px) 0; }
+.chat-switch [aria-pressed="true"] { border-color: var(--accent); }
+.agent-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
 .task-summary { display: flex; align-items: flex-start; gap: 13px; margin: 0 0 24px; }
 .summary-icon { display: grid; place-items: center; width: 37px; height: 37px; color: #c2a478; background: #272522; border: 1px solid #393128; border-radius: 8px; flex: none; }
 .task-summary h2 { margin: 0 0 5px; font-size: 15px; }

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import type { CSSProperties } from 'react'
 import { createRoot } from 'react-dom/client'
 import { ArrowUp, ChevronDown, ChevronRight, CircleAlert, FileCode2, FileText, Folder, GitBranch, GitCompareArrows, Link2, MessageSquare, PanelRight, PanelRightDashed, Search, Settings, X, Zap } from 'lucide-react'
+import TaskAgentChat from './TaskAgentChat'
 import './style.css'
 
 type Status = 'todo' | 'progress' | 'testing'
@@ -248,6 +249,7 @@ function TaskWorkspace({ task, release, allTasks, selectTask, reviewOpen, setRev
   const [sendError, setSendError] = useState('')
   const [attempt, setAttempt] = useState(0)
   const [fileIndex, setFileIndex] = useState(0)
+  const [agentChat, setAgentChat] = useState(false)
   const bottom = useRef<HTMLDivElement>(null)
   const focusReviewToggle = useRef(false)
   const endpoint = `/api/tasks/${encodeURIComponent(task.key)}/messages`
@@ -329,7 +331,11 @@ function TaskWorkspace({ task, release, allTasks, selectTask, reviewOpen, setRev
           </div>
         })}
       </header>
-      <section className="conversation" aria-label="Чат задачи">
+      <div className="chat-switch" role="group" aria-label="Чат задачи">
+        <button type="button" className="secondary" aria-pressed={!agentChat} onClick={() => setAgentChat(false)}>Команда</button>
+        <button type="button" className="secondary" aria-pressed={agentChat} onClick={() => setAgentChat(true)}>GigaCode</button>
+      </div>
+      <section hidden={agentChat} className="conversation" aria-label="Чат команды">
         <article className="task-summary"><span className="summary-icon"><FileText size={20} /></span><div><h2>Описание задачи</h2><p>{task.summary}</p></div></article>
         {loading && <p className="muted">Загружаем чат…</p>}
         {loadError && <div className="inline-error" role="alert">{loadError} <button className="text-button" onClick={() => setAttempt(value => value + 1)}>Повторить</button></div>}
@@ -337,7 +343,7 @@ function TaskWorkspace({ task, release, allTasks, selectTask, reviewOpen, setRev
         {messages.map(message => <article className="message" key={message.id}><header><strong>Вы</strong><time dateTime={message.createdAt}>{dateFormat.format(new Date(message.createdAt))}</time></header><p>{message.text}</p></article>)}
         <div ref={bottom} />
       </section>
-      <form className="composer" onSubmit={event => { event.preventDefault(); void send() }}>
+      <form hidden={agentChat} className="composer" onSubmit={event => { event.preventDefault(); void send() }}>
         {sendError && <p role="alert" className="inline-error">{sendError}</p>}
         <div className="composer-box">
           <textarea aria-label="Сообщение по задаче" placeholder="Написать сообщение по задаче…" value={draft} readOnly={sending} maxLength={4000} onChange={event => setDraft(event.target.value)} onKeyDown={event => {
@@ -346,6 +352,7 @@ function TaskWorkspace({ task, release, allTasks, selectTask, reviewOpen, setRev
           <div className="composer-actions"><span>Shift + Enter для новой строки</span><button className="send" aria-label="Отправить сообщение" title="Отправить сообщение" disabled={!draft.trim() || sending || loading || Boolean(loadError)}><ArrowUp size={19} /></button></div>
         </div>
       </form>
+      <TaskAgentChat taskKey={task.key} active={agentChat} />
     </main>
     {reviewOpen && <>{reviewDivider}<button className="review-backdrop" aria-label="Закрыть панель изменений" tabIndex={-1} onClick={toggleReview} /><aside className="review" id="review" aria-label="Изменения в задаче">
       <header className="review-header"><GitCompareArrows size={18} /><h2>Изменения</h2>{reviewToggle}</header>
