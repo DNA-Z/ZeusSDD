@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import type { CSSProperties } from 'react'
 import { createRoot } from 'react-dom/client'
-import { ArrowUp, ChevronDown, ChevronRight, CircleAlert, FileCode2, FileText, Folder, GitBranch, GitCompareArrows, Link2, MessageSquare, PanelRight, PanelRightDashed, Search, Settings, X, Zap } from 'lucide-react'
+import { ArrowUp, ChevronDown, ChevronRight, CircleAlert, FileCode2, FileText, Folder, GitBranch, GitCompareArrows, Link2, Maximize2, MessageSquare, Minimize2, Package, PanelRight, PanelRightDashed, Search, Settings, X, Zap } from 'lucide-react'
 import TaskAgentChat from './TaskAgentChat'
 import './style.css'
 
@@ -17,10 +17,12 @@ type Task = {
 }
 type Release = { id: string; sprint: string; current: boolean; tasks: Task[] }
 type Message = { id: number; text: string; createdAt: string }
+type ReviewMode = 'closed' | 'split' | 'maximized'
 
 const statusNames: Record<Status, string> = { todo: 'Не взята в работу', progress: 'В работе', testing: 'На тестировании' }
 const dateFormat = new Intl.DateTimeFormat('ru', { hour: '2-digit', minute: '2-digit' })
 const minSidebar = 200
+const collapsedSidebarWidth = 64
 const minReview = 290
 const minWorkspace = 320
 
@@ -41,25 +43,30 @@ function usePanelWidth(panel: 'sidebar' | 'review') {
   return [width, setWidth] as const
 }
 
-function PanelDivider({ panel, width, min, max, onResize }: {
-  panel: 'sidebar' | 'review'; width: number; min: number; max: number; onResize: (width: number) => void
+function PanelDivider({ panel, width, min, max, expandedMin, onResize }: {
+  panel: 'sidebar' | 'review'; width: number; min: number; max: number; expandedMin?: number; onResize: (width: number) => void
 }) {
   const drag = useRef<{ pointerId: number; x: number; width: number } | null>(null)
   const direction = panel === 'sidebar' ? 1 : -1
 
   function resize(value: number) {
+    if (expandedMin !== undefined) {
+      value = value < (min + expandedMin) / 2 ? min : Math.max(expandedMin, value)
+    }
     onResize(Math.round(Math.max(min, Math.min(max, value))))
   }
 
   return <div className="panel-divider" role="separator" tabIndex={0} aria-orientation="vertical"
     aria-label={panel === 'sidebar' ? 'Ширина списка задач' : 'Ширина панели изменений'}
     aria-controls={panel} aria-valuemin={min} aria-valuemax={max} aria-valuenow={width}
+    aria-valuetext={expandedMin !== undefined && width === min ? 'Свёрнута' : undefined}
     onPointerDown={event => {
       if (event.button !== 0 || drag.current) return
       event.preventDefault()
       event.currentTarget.focus()
       event.currentTarget.setPointerCapture(event.pointerId)
-      drag.current = { pointerId: event.pointerId, x: event.clientX, width }
+      const renderedWidth = panel === 'sidebar' ? event.currentTarget.previousElementSibling?.getBoundingClientRect().width : undefined
+      drag.current = { pointerId: event.pointerId, x: event.clientX, width: renderedWidth ?? width }
     }}
     onPointerMove={event => {
       const start = drag.current
@@ -73,7 +80,10 @@ function PanelDivider({ panel, width, min, max, onResize }: {
       const next = { ArrowLeft: width - step * direction, ArrowRight: width + step * direction, Home: min, End: max }
       if (!Object.hasOwn(next, event.key)) return
       event.preventDefault()
-      resize(next[event.key as keyof typeof next])
+      const value = next[event.key as keyof typeof next]
+      if (expandedMin !== undefined && width === min && value > width) resize(event.key === 'End' ? max : expandedMin)
+      else if (width === expandedMin && value < width) resize(min)
+      else resize(value)
     }}
   />
 }
@@ -91,7 +101,7 @@ function StatusDot({ status }: { status: Status }) {
 
 type Theme = 'dark' | 'light'
 
-function SettingsMenu() {
+function SettingsMenu({ compact }: { compact: boolean }) {
   const dialog = useRef<HTMLDialogElement>(null)
   const [theme, setTheme] = useState<Theme | null>(null)
   const [error, setError] = useState('')
@@ -130,8 +140,8 @@ function SettingsMenu() {
 
   return <>
     <div className="sidebar-footer">
-      <button type="button" className="settings-button" aria-haspopup="dialog" onClick={() => dialog.current?.showModal()}>
-        <span className="settings-icon"><Settings size={18} /></span>Настройки
+      <button type="button" className="settings-button" aria-haspopup="dialog" aria-label="Настройки" title={compact ? 'Настройки' : undefined} onClick={() => dialog.current?.showModal()}>
+        <span className="settings-icon"><Settings size={18} aria-hidden="true" /></span>{!compact && 'Настройки'}
       </button>
     </div>
     <dialog className="settings-dialog" aria-labelledby="settings-title" ref={dialog}>
@@ -156,10 +166,14 @@ function App() {
   const [error, setError] = useState('')
   const [attempt, setAttempt] = useState(0)
   const [loading, setLoading] = useState(true)
-  const [reviewOpen, setReviewOpen] = useState(window.innerWidth > 850)
+  const [reviewMode, setReviewMode] = useState<ReviewMode>(() => window.innerWidth > 850 ? 'split' : 'closed')
   const [viewport, setViewport] = useState(window.innerWidth)
   const [preferredSidebar, setSidebarWidth] = usePanelWidth('sidebar')
   const [preferredReview, setReviewWidth] = usePanelWidth('review')
+  const [sidebarExpansionStart, setSidebarExpansionStart] = useState<number | undefined>(undefined)
+  const sidebar = useRef<HTMLElement>(null)
+  const lastExpandedSidebar = useRef<number | undefined>(undefined)
+  const focusReleases = useRef(false)
 
   useEffect(() => {
     const measure = () => setViewport(window.innerWidth)
@@ -188,14 +202,38 @@ function App() {
   const allTasks = releases.flatMap(release => release.tasks)
   const search = query.trim().toLocaleLowerCase('ru')
   const desktop = viewport > 850
-  const reviewVisible = desktop && Boolean(task && reviewOpen)
-  const panelSpace = viewport - minWorkspace - (reviewVisible ? 2 : 1)
-  const sidebarWidth = Math.max(minSidebar, Math.min(preferredSidebar ?? (viewport <= 1100 ? 232 : 276), panelSpace - (reviewVisible ? minReview : 0)))
+  const sidebarCollapsed = desktop && preferredSidebar === collapsedSidebarWidth
+  const sidebarExpanding = desktop && sidebarExpansionStart !== undefined
+  const reviewDocked = desktop && Boolean(task) && reviewMode === 'split'
+  const panelSpace = viewport - minWorkspace - (reviewDocked ? 2 : 1)
+  const defaultSidebar = viewport <= 1100 ? 232 : 276
+  const sidebarLimit = panelSpace - (reviewDocked ? minReview : 0)
+  const sidebarWidth = sidebarCollapsed ? collapsedSidebarWidth : Math.max(minSidebar, Math.min(preferredSidebar ?? defaultSidebar, sidebarLimit))
   const maxReview = Math.max(minReview, panelSpace - sidebarWidth)
   const reviewWidth = Math.max(minReview, Math.min(preferredReview ?? Math.round(Math.min(860, viewport * .37)), maxReview))
-  const maxSidebar = panelSpace - (reviewVisible ? reviewWidth : 0)
-  const panelStyles = desktop ? { '--sidebar-width': `${sidebarWidth}px`, '--review-width': `${reviewWidth}px` } as CSSProperties : undefined
-  const reviewDivider = reviewVisible && <PanelDivider panel="review" width={reviewWidth} min={minReview} max={maxReview} onResize={setReviewWidth} />
+  const maxSidebar = Math.max(panelSpace - (reviewDocked ? reviewWidth : 0), sidebarCollapsed ? Math.min(defaultSidebar, sidebarLimit) : minSidebar)
+  const panelStyles = desktop ? {
+    '--sidebar-width': `${sidebarWidth}px`,
+    '--review-width': `${reviewWidth}px`,
+    '--workspace-min-width': `${minWorkspace}px`,
+    '--sidebar-expansion-start': sidebarExpanding ? `${sidebarExpansionStart}px` : undefined,
+  } as CSSProperties : undefined
+  const reviewDivider = reviewDocked && <PanelDivider panel="review" width={reviewWidth} min={minReview} max={maxReview} onResize={setReviewWidth} />
+
+  function resizeSidebar(width: number) {
+    if (width === collapsedSidebarWidth && !sidebarCollapsed) {
+      lastExpandedSidebar.current = preferredSidebar ?? sidebarWidth
+      setSidebarExpansionStart(undefined)
+    } else if (sidebarCollapsed && width !== collapsedSidebarWidth && window.matchMedia('(prefers-reduced-motion: no-preference)').matches) {
+      setSidebarExpansionStart(sidebar.current?.getBoundingClientRect().width)
+    }
+    setSidebarWidth(width)
+  }
+
+  function expandSidebar(focusList = false) {
+    focusReleases.current = focusList
+    resizeSidebar(lastExpandedSidebar.current ?? defaultSidebar)
+  }
 
   function selectTask(key: string) {
     const parent = releases.find(release => release.tasks.some(task => task.key === key))
@@ -204,41 +242,61 @@ function App() {
     setOpened(previous => previous.includes(parent.id) ? previous : [...previous, parent.id])
   }
 
+  const Brand = desktop ? 'button' : 'div'
+  const sidebarToggleLabel = sidebarCollapsed ? 'Развернуть боковую панель' : 'Свернуть боковую панель'
+
   return <div className="app" style={panelStyles}>
-    <aside className="sidebar" id="sidebar">
-      <div className="brand"><span className="brand-mark"><Zap size={19} fill="currentColor" strokeWidth={1.5} /></span><span>Zeus<span className="brand-accent">SDD</span><small>Рабочее пространство</small></span></div>
-      <label className="search"><Search size={16} /><input value={query} onChange={event => setQuery(event.target.value)} placeholder="Поиск задач" aria-label="Поиск задач" />{query && <button className="icon-button" onClick={() => setQuery('')} aria-label="Очистить поиск"><X size={14} /></button>}</label>
-      <nav className="folders" aria-label="Релизы">
-        <div className="section-label">Релизы</div>
-        {releases.map(release => {
-          const matching = release.tasks.filter(task => `${task.key} ${task.title}`.toLocaleLowerCase('ru').includes(search))
-          const expanded = opened.includes(release.id) || Boolean(search)
-          if (search && !matching.length) return null
-          return <div className="folder" key={release.id}>
-            {search ? <div className="folder-button"><Folder size={17} /><span>{release.id}</span></div> : <button className="folder-button" onClick={() => setOpened(previous => expanded ? previous.filter(id => id !== release.id) : [...previous, release.id])} aria-expanded={expanded}>
-              {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}<Folder size={17} /><span>{release.id}</span>{release.current && <span className="current">Текущий</span>}
-            </button>}
-            {expanded && <div className="task-list">{matching.map(task => <button className={`task-button ${task.key === selected ? 'selected' : ''}`} aria-current={task.key === selected ? 'true' : undefined} key={task.key} onClick={() => selectTask(task.key)}>
-              <span className="task-line"><StatusDot status={task.status} /><span>{task.key}</span>{task.hasSpec && <span className="sdd">SDD</span>}</span>
-              <span className="task-title">{task.title}</span>
-            </button>)}</div>}
-          </div>
-        })}
-        {search && !allTasks.some(task => `${task.key} ${task.title}`.toLocaleLowerCase('ru').includes(search)) && <p className="sidebar-empty">Задачи не найдены</p>}
-      </nav>
-      <SettingsMenu />
+    <aside className={sidebarCollapsed ? 'sidebar collapsed' : sidebarExpanding ? 'sidebar expanding' : 'sidebar'}
+      id="sidebar" ref={sidebar} onAnimationEnd={event => {
+        if (event.target === event.currentTarget && event.animationName === 'sidebar-expand') setSidebarExpansionStart(undefined)
+      }}>
+      <Brand className="brand" {...(desktop ? {
+        type: 'button' as const, title: sidebarToggleLabel, 'aria-label': `ZeusSDD — ${sidebarToggleLabel}`, 'aria-expanded': !sidebarCollapsed,
+        onClick: () => sidebarCollapsed ? expandSidebar() : resizeSidebar(collapsedSidebarWidth),
+      } : {})}>
+        <span className="brand-mark"><Zap size={19} fill="currentColor" strokeWidth={1.5} aria-hidden="true" /></span>
+        {!sidebarCollapsed && <span>Zeus<span className="brand-accent">SDD</span><small>Рабочее пространство</small></span>}
+      </Brand>
+      {sidebarCollapsed ? <button type="button" className="icon-button releases-button" aria-label="Релизы" title="Релизы" onClick={() => expandSidebar(true)}>
+        <Package size={20} aria-hidden="true" />
+      </button> : <>
+        <label className="search"><Search size={16} /><input value={query} onChange={event => setQuery(event.target.value)} placeholder="Поиск задач" aria-label="Поиск задач" />{query && <button className="icon-button" onClick={() => setQuery('')} aria-label="Очистить поиск"><X size={14} /></button>}</label>
+        <nav className="folders" aria-label="Релизы" tabIndex={-1} ref={list => {
+          if (!list || !focusReleases.current) return
+          focusReleases.current = false
+          list.focus({ preventScroll: true })
+        }}>
+          <div className="section-label">Релизы</div>
+          {releases.map(release => {
+            const matching = release.tasks.filter(task => `${task.key} ${task.title}`.toLocaleLowerCase('ru').includes(search))
+            const expanded = opened.includes(release.id) || Boolean(search)
+            if (search && !matching.length) return null
+            return <div className="folder" key={release.id}>
+              {search ? <div className="folder-button"><Folder size={17} /><span>{release.id}</span></div> : <button className="folder-button" onClick={() => setOpened(previous => expanded ? previous.filter(id => id !== release.id) : [...previous, release.id])} aria-expanded={expanded}>
+                {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}<Folder size={17} /><span>{release.id}</span>{release.current && <span className="current">Текущий</span>}
+              </button>}
+              {expanded && <div className="task-list">{matching.map(task => <button className={`task-button ${task.key === selected ? 'selected' : ''}`} aria-current={task.key === selected ? 'true' : undefined} key={task.key} onClick={() => selectTask(task.key)}>
+                <span className="task-line"><StatusDot status={task.status} /><span>{task.key}</span>{task.hasSpec && <span className="sdd">SDD</span>}</span>
+                <span className="task-title">{task.title}</span>
+              </button>)}</div>}
+            </div>
+          })}
+          {search && !allTasks.some(task => `${task.key} ${task.title}`.toLocaleLowerCase('ru').includes(search)) && <p className="sidebar-empty">Задачи не найдены</p>}
+        </nav>
+      </>}
+      <SettingsMenu compact={sidebarCollapsed} />
     </aside>
-    {desktop && <PanelDivider panel="sidebar" width={sidebarWidth} min={minSidebar} max={maxSidebar} onResize={setSidebarWidth} />}
-    {task && release ? <TaskWorkspace key={task.key} {...{ task, release, allTasks, selectTask, reviewOpen, setReviewOpen, reviewDivider }} /> :
+    {desktop && <PanelDivider panel="sidebar" width={sidebarWidth} min={collapsedSidebarWidth} max={maxSidebar} expandedMin={minSidebar} onResize={resizeSidebar} />}
+    {task && release ? <TaskWorkspace key={task.key} {...{ task, release, allTasks, selectTask, reviewMode, setReviewMode, reviewDivider }} /> :
       <main className="welcome">
         {error ? <><CircleAlert size={24} /><p role="alert">{error}</p><button className="secondary" onClick={() => setAttempt(value => value + 1)}>Повторить</button></> : <p>{loading ? 'Загружаем релизы…' : 'Выберите задачу в списке.'}</p>}
       </main>}
   </div>
 }
 
-function TaskWorkspace({ task, release, allTasks, selectTask, reviewOpen, setReviewOpen, reviewDivider }: {
+function TaskWorkspace({ task, release, allTasks, selectTask, reviewMode, setReviewMode, reviewDivider }: {
   task: Task; release: Release; allTasks: Task[]; selectTask: (key: string) => void
-  reviewOpen: boolean; setReviewOpen: (value: boolean) => void
+  reviewMode: ReviewMode; setReviewMode: (value: ReviewMode) => void
   reviewDivider: React.ReactNode
 }) {
   const [messages, setMessages] = useState<Message[]>([])
@@ -288,12 +346,16 @@ function TaskWorkspace({ task, release, allTasks, selectTask, reviewOpen, setRev
   }
 
   const file = task.files[fileIndex]
+  const reviewOpen = reviewMode !== 'closed'
+  const reviewMaximized = reviewMode === 'maximized'
   const toggleLabel = reviewOpen ? 'Скрыть боковую панель' : 'Показать боковую панель'
+  const maximizeLabel = reviewMaximized ? 'Вернуть карточку задачи' : 'Развернуть изменения'
   const PanelIcon = reviewOpen ? PanelRight : PanelRightDashed
+  const MaximizeIcon = reviewMaximized ? Minimize2 : Maximize2
 
   function toggleReview() {
     focusReviewToggle.current = true
-    setReviewOpen(!reviewOpen)
+    setReviewMode(reviewOpen ? 'closed' : 'split')
   }
 
   const reviewToggle = <button type="button" className="icon-button review-toggle"
@@ -308,7 +370,7 @@ function TaskWorkspace({ task, release, allTasks, selectTask, reviewOpen, setRev
   </button>
 
   return <>
-    <main className="workspace">
+    <main className="workspace" id="workspace" hidden={reviewMaximized}>
       <div className="topbar"><span className="breadcrumb"><Folder size={16} /> <span>{release.id}</span><ChevronRight size={13} /><strong>{task.key}</strong></span>
         {!reviewOpen && reviewToggle}
       </div>
@@ -354,8 +416,17 @@ function TaskWorkspace({ task, release, allTasks, selectTask, reviewOpen, setRev
       </form>
       <TaskAgentChat taskKey={task.key} active={agentChat} />
     </main>
-    {reviewOpen && <>{reviewDivider}<button className="review-backdrop" aria-label="Закрыть панель изменений" tabIndex={-1} onClick={toggleReview} /><aside className="review" id="review" aria-label="Изменения в задаче">
-      <header className="review-header"><GitCompareArrows size={18} /><h2>Изменения</h2>{reviewToggle}</header>
+    {reviewOpen && <>{reviewDivider}
+      {!reviewMaximized && <button className="review-backdrop" aria-label="Закрыть панель изменений" tabIndex={-1} onClick={toggleReview} />}
+      <aside className={reviewMaximized ? 'review maximized' : 'review'} id="review" aria-label="Изменения в задаче">
+      <header className="review-header">
+        <GitCompareArrows size={18} /><h2>Изменения</h2>
+        <button type="button" className="icon-button review-toggle" aria-label={maximizeLabel} title={maximizeLabel}
+          aria-controls="workspace" onClick={() => setReviewMode(reviewMaximized ? 'split' : 'maximized')}>
+          <MaximizeIcon size={20} aria-hidden="true" />
+        </button>
+        {reviewToggle}
+      </header>
       <div className="review-body">
         <div className="file-caption">Файлы <span>{task.files.length}</span></div>
         {task.files.length ? <div className="files">{task.files.map((file, index) => {

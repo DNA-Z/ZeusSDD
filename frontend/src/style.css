@@ -34,9 +34,24 @@ p { margin: 0; line-height: 1.55; }
 .panel-divider:focus-visible::after { content: ""; position: absolute; inset: 0; border-block: 2px solid currentColor; }
 .app:has(.panel-divider:active) { cursor: col-resize; user-select: none; }
 .brand { display: flex; align-items: center; gap: 11px; margin: 24px 20px 23px; font-size: 22px; font-weight: 750; letter-spacing: -.045em; line-height: 1.12; }
-.brand-mark { width: 39px; height: 39px; border-radius: 11px; background: var(--accent); color: #251b0e; display: grid; place-items: center; }
+button.brand { border: 0; border-radius: 11px; padding: 0; background: transparent; text-align: left; }
+.brand-mark { align-self: flex-start; flex-shrink: 0; width: 39px; height: 39px; border-radius: 11px; background: var(--accent); color: #251b0e; display: grid; place-items: center; }
 .brand-accent { color: var(--accent); }
 .brand small { display: block; margin-top: 4px; font-size: 12px; font-weight: 500; letter-spacing: .01em; color: var(--muted); }
+.sidebar.collapsed :is(.brand, .releases-button, .settings-button) { align-self: start; margin-inline: calc((var(--sidebar-width) - 39px) / 2) 0; }
+.sidebar.collapsed .releases-button { width: 39px; height: 39px; color: var(--accent); }
+.sidebar.collapsed .sidebar-footer { margin-top: auto; padding-inline: 0; }
+.sidebar.collapsed .settings-button { width: 39px; height: 39px; justify-content: center; padding: 0; }
+@media (prefers-reduced-motion: no-preference) {
+  .sidebar.collapsed { transition: width 180ms ease-out; }
+  .sidebar.expanding { animation: sidebar-expand 180ms ease-out; overflow: clip; }
+  .sidebar.collapsed ~ .workspace { min-width: var(--workspace-min-width); }
+  .sidebar.collapsed ~ .review { flex-shrink: 1; }
+}
+@keyframes sidebar-expand {
+  from { width: var(--sidebar-expansion-start); }
+  to { width: var(--sidebar-width); }
+}
 .search { margin: 0 15px 24px; display: flex; align-items: center; gap: 9px; border: 1px solid var(--line); background: #1d2026; color: var(--muted); padding: 9px 10px; border-radius: 8px; }
 .search input { flex: 1; min-width: 0; width: 100%; border: 0; background: transparent; color: #eeeff2; font-size: 14px; outline: none; }
 .search:focus-within { border-color: #9a7442; }
@@ -74,6 +89,7 @@ button.folder-button:hover, .icon-button:hover { background: #262a32; }
 .theme-setting select { font: inherit; color: inherit; background: var(--sidebar); border: 1px solid var(--line); border-radius: 6px; padding: 7px 10px; }
 .settings-dialog .inline-error { margin-top: 10px; }
 .workspace { flex: 1; min-width: 0; display: flex; flex-direction: column; overflow: auto; }
+.workspace[hidden] { display: none; }
 .topbar, .review-header { height: 61px; flex-shrink: 0; display: flex; align-items: center; border-bottom: 1px solid var(--line); }
 .topbar { justify-content: space-between; gap: 10px; padding: 0 26px; }
 .breadcrumb { display: flex; align-items: center; gap: 8px; font-size: 14px; color: var(--muted); white-space: nowrap; }
@@ -119,6 +135,7 @@ button.folder-button:hover, .icon-button:hover { background: #262a32; }
 .send:not(:disabled):hover { background: #ffe0ab; }
 .send:disabled { background: #303035; color: #a2a2a7; }
 .review { flex: 0 0 var(--review-width, 320px); min-width: 0; background: var(--panel); border-left: 1px solid var(--line); display: flex; flex-direction: column; }
+.review.maximized { flex: 1; border-left: 0; }
 .review-header { padding: 0 17px; gap: 9px; color: var(--muted); }
 .review-header h2 { flex: 1; margin: 0; font-size: 15px; color: #eeeff2; }
 .icon-button { background: transparent; display: grid; place-items: center; color: var(--muted); border: 0; border-radius: 5px; padding: 4px; }
@@ -152,7 +169,7 @@ button.folder-button:hover, .icon-button:hover { background: #262a32; }
 .review-backdrop { display: none; }
 @media (max-width: 1100px) { .task-header { padding-top: 20px; } }
 @media (max-width: 850px) {
-  .review { position: fixed; inset: 0 0 0 auto; width: min(620px, 95vw); z-index: 2; }
+  .review:not(.maximized) { position: fixed; inset: 0 0 0 auto; width: min(620px, 95vw); z-index: 2; }
   .review-backdrop { display: block; position: fixed; inset: 0; border: 0; background: #0008; z-index: 1; }
 }
 @media (max-width: 580px) {
