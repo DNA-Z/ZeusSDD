@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from 'react'
-import type { CSSProperties } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import type { CSSProperties, PointerEvent as ReactPointerEvent } from 'react'
 import { createRoot } from 'react-dom/client'
 import { ArrowUp, ChevronDown, ChevronRight, CircleAlert, FileCode2, FileText, Folder, GitBranch, GitCompareArrows, Link2, Maximize2, MessageSquare, Minimize2, Package, PanelRight, PanelRightDashed, Search, Settings, X, Zap } from 'lucide-react'
 import TaskAgentChat from './TaskAgentChat'
@@ -103,6 +103,183 @@ type Theme = 'dark' | 'light'
 
 function SettingsMenu({ compact }: { compact: boolean }) {
   const dialog = useRef<HTMLDialogElement>(null)
+type TaskDrag = {
+  pointerId: number
+  button: HTMLButtonElement
+  list: HTMLDivElement
+  scroller: HTMLElement
+  rows: HTMLButtonElement[]
+  from: number
+  to: number
+  startX: number
+  startY: number
+  grabOffset: number
+  x: number
+  y: number
+  frame: number | null
+}
+
+function TaskList({ release, matching, selected, selectTask }: {
+  release: Release; matching: Task[]; selected: string; selectTask: (key: string) => void
+}) {
+  const storageKey = `zeussdd.taskOrder.${release.id}`
+  const [order, setOrder] = useState<string[]>(() => {
+    try {
+      const saved: unknown = JSON.parse(localStorage.getItem(storageKey) ?? '[]')
+      return Array.isArray(saved) ? saved.filter((key): key is string => typeof key === 'string') : []
+    } catch {
+      return []
+    }
+  })
+  const [preview, setPreview] = useState<{ from: number; to: number; space: number } | null>(null)
+  const [error, setError] = useState('')
+  const list = useRef<HTMLDivElement>(null)
+  const drag = useRef<TaskDrag | null>(null)
+  const skipClick = useRef(false)
+  const dropPositions = useRef<Map<HTMLButtonElement, number> | null>(null)
+  const positions = new Map(order.map((key, index) => [key, index]))
+  const ordered = [...release.tasks].sort((a, b) =>
+    (positions.get(a.key) ?? order.length) - (positions.get(b.key) ?? order.length))
+  const matchingKeys = new Set(matching.map(task => task.key))
+  const visible = ordered.filter(task => matchingKeys.has(task.key))
+  const reorderable = visible.length > 1
+
+  useEffect(() => () => {
+    const frame = drag.current?.frame
+    if (frame != null) cancelAnimationFrame(frame)
+    drag.current = null
+  }, [])
+
+  useLayoutEffect(() => {
+    const previous = dropPositions.current
+    dropPositions.current = null
+    if (!previous || window.matchMedia('(prefers-reduced-motion: reduce)').matches) return
+    for (const [row, top] of previous) {
+      const offset = top - row.getBoundingClientRect().top
+      if (offset) row.animate([{ translate: `0 ${offset}px` }, { translate: '0 0' }], { duration: 160, easing: 'ease-out' })
+    }
+  }, [preview])
+
+  function startDrag(event: ReactPointerEvent<HTMLButtonElement>, index: number) {
+    if (event.button !== 0 || drag.current) return
+    skipClick.current = false
+    const container = list.current
+    const scroller = container?.closest<HTMLElement>('.folders')
+    if (!reorderable || event.pointerType === 'touch' || !container || !scroller) return
+    const button = event.currentTarget
+    const rows = Array.from(container.querySelectorAll<HTMLButtonElement>('.task-button'))
+    for (const row of rows) {
+      for (const animation of row.getAnimations()) animation.cancel()
+    }
+    button.setPointerCapture(event.pointerId)
+    drag.current = {
+      pointerId: event.pointerId, button, list: container, scroller, rows, from: index, to: index,
+      startX: event.clientX, startY: event.clientY, grabOffset: event.clientY - button.getBoundingClientRect().top,
+      x: event.clientX, y: event.clientY, frame: null,
+    }
+  }
+
+  function updateDrag(active: TaskDrag, autoScroll: boolean) {
+    const { button, list, scroller, rows, from, x, y } = active
+    const viewport = scroller.getBoundingClientRect()
+    if (autoScroll && x >= viewport.left && x <= viewport.right && y >= viewport.top && y <= viewport.bottom) {
+      const edge = 32
+      const scroll = Math.max(0, y - (viewport.bottom - edge)) - Math.max(0, viewport.top + edge - y)
+      if (scroll) scroller.scrollTop += scroll / 4
+    }
+    const bounds = list.getBoundingClientRect()
+    const top = y - active.grabOffset - bounds.top - list.clientTop
+    const last = rows[rows.length - 1]
+    const offset = Math.max(rows[0].offsetTop, Math.min(last.offsetTop + last.offsetHeight - button.offsetHeight, top))
+    button.style.setProperty('--task-drag-offset', `${offset - button.offsetTop}px`)
+    const center = offset + button.offsetHeight / 2
+    const to = rows.reduce((nearest, row, index) => {
+      const distance = Math.abs(row.offsetTop + row.offsetHeight / 2 - center)
+      const current = rows[nearest]
+      return distance < Math.abs(current.offsetTop + current.offsetHeight / 2 - center) ? index : nearest
+    }, from)
+    if (to !== active.to || active.frame === null) {
+      active.to = to
+      const gap = rows[1].offsetTop - rows[0].offsetTop - rows[0].offsetHeight
+      setPreview({ from, to, space: button.offsetHeight + gap })
+    }
+  }
+
+  function moveDrag(event: ReactPointerEvent<HTMLButtonElement>) {
+    const active = drag.current
+    if (active?.pointerId !== event.pointerId) return
+    active.x = event.clientX
+    active.y = event.clientY
+    if (active.frame !== null || Math.hypot(active.x - active.startX, active.y - active.startY) < 5) return
+    skipClick.current = true
+    const trackDrag = () => {
+      updateDrag(active, true)
+      active.frame = requestAnimationFrame(trackDrag)
+    }
+    trackDrag()
+  }
+
+  function finishDrag(pointerId: number, drop?: { x: number; y: number }) {
+    const active = drag.current
+    if (active?.pointerId !== pointerId) return
+    drag.current = null
+    if (active.frame === null) return
+    cancelAnimationFrame(active.frame)
+    if (drop) {
+      active.x = drop.x
+      active.y = drop.y
+      updateDrag(active, false)
+    }
+    dropPositions.current = new Map(active.rows.map(row => [row, row.getBoundingClientRect().top]))
+    active.button.style.removeProperty('--task-drag-offset')
+    setPreview(null)
+    const { left, right, top, bottom } = active.list.getBoundingClientRect()
+    const viewport = active.scroller.getBoundingClientRect()
+    if (!drop || drop.x < left || drop.x > right ||
+        drop.y < Math.max(top, viewport.top) || drop.y > Math.min(bottom, viewport.bottom) ||
+        active.from === active.to) return
+
+    const dragged = visible[active.from].key
+    const target = visible[active.to].key
+    const keys = ordered.map(task => task.key)
+    const next = keys.filter(key => key !== dragged)
+    const destination = next.indexOf(target) + (active.to > active.from ? 1 : 0)
+    next.splice(destination, 0, dragged)
+    try {
+      localStorage.setItem(storageKey, JSON.stringify(next))
+      setOrder(next)
+      setError('')
+    } catch {
+      setError('Не удалось сохранить порядок задач.')
+    }
+  }
+
+  return <div className="task-list" ref={list} data-reordering={preview !== null || undefined}>
+    {visible.map((task, index) => <button
+      type="button" className={`task-button ${task.key === selected ? 'selected' : ''}`}
+      aria-current={task.key === selected ? 'true' : undefined} key={task.key}
+      data-dragging={preview?.from === index || undefined}
+      style={preview && preview.from < index && index <= preview.to ? { translate: `0 ${-preview.space}px` } :
+        preview && preview.to <= index && index < preview.from ? { translate: `0 ${preview.space}px` } : undefined}
+      onClick={event => {
+        if (!event.detail || !skipClick.current) selectTask(task.key)
+      }}
+      onPointerDown={event => startDrag(event, index)}
+      onPointerMove={moveDrag}
+      onPointerUp={event => finishDrag(event.pointerId, { x: event.clientX, y: event.clientY })}
+      onPointerCancel={event => finishDrag(event.pointerId)}
+      onLostPointerCapture={event => finishDrag(event.pointerId)}
+      onKeyDown={event => {
+        if (event.key === 'Escape' && drag.current) finishDrag(drag.current.pointerId)
+      }}
+    >
+      <span className="task-line"><StatusDot status={task.status} /><span>{task.key}</span>{task.hasSpec && <span className="sdd">SDD</span>}</span>
+      <span className="task-title">{task.title}</span>
+    </button>)}
+    {error && <p className="inline-error" role="alert">{error}</p>}
+  </div>
+}
+
   const [theme, setTheme] = useState<Theme | null>(null)
   const [error, setError] = useState('')
   const [saving, setSaving] = useState(false)
@@ -275,10 +452,7 @@ function App() {
               {search ? <div className="folder-button"><Folder size={17} /><span>{release.id}</span></div> : <button className="folder-button" onClick={() => setOpened(previous => expanded ? previous.filter(id => id !== release.id) : [...previous, release.id])} aria-expanded={expanded}>
                 {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}<Folder size={17} /><span>{release.id}</span>{release.current && <span className="current">Текущий</span>}
               </button>}
-              {expanded && <div className="task-list">{matching.map(task => <button className={`task-button ${task.key === selected ? 'selected' : ''}`} aria-current={task.key === selected ? 'true' : undefined} key={task.key} onClick={() => selectTask(task.key)}>
-                <span className="task-line"><StatusDot status={task.status} /><span>{task.key}</span>{task.hasSpec && <span className="sdd">SDD</span>}</span>
-                <span className="task-title">{task.title}</span>
-              </button>)}</div>}
+              {expanded && <TaskList {...{ release, matching, selected, selectTask }} />}
             </div>
           })}
           {search && !allTasks.some(task => `${task.key} ${task.title}`.toLocaleLowerCase('ru').includes(search)) && <p className="sidebar-empty">Задачи не найдены</p>}

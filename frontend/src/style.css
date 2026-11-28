@@ -64,10 +64,17 @@ button.brand { border: 0; border-radius: 11px; padding: 0; background: transpare
 .folder-button svg { color: #b8a488; }
 button.folder-button:hover, .icon-button:hover { background: #262a32; }
 .current { margin-left: auto; color: #d4b184; background: #f3c57c11; padding: 2px 6px; border-radius: 4px; font-size: 11px; }
-.task-list { display: grid; gap: 3px; border-left: 1px solid #33363e; margin: 4px 0 13px 15px; padding-left: 7px; }
+.task-list { position: relative; display: grid; gap: 3px; border-left: 1px solid #33363e; margin: 4px 0 13px 15px; padding-left: 7px; }
 .task-button { display: flex; flex-direction: column; gap: 4px; width: 100%; min-width: 0; padding: 8px 9px; border: 1px solid transparent; border-radius: 7px; background: transparent; text-align: left; }
 .task-button:hover { background: #23262d; }
 .task-button.selected { border-color: #53432c; background: #2b261f; }
+.task-list[data-reordering] { user-select: none; cursor: grabbing; }
+.task-list[data-reordering] .task-button { cursor: grabbing; }
+.task-button[data-dragging] { position: relative; z-index: 1; translate: 0 var(--task-drag-offset, 0px); box-shadow: 0 5px 14px #0004; }
+.task-button[data-dragging]:not(.selected) { background: var(--panel); border-color: var(--line); }
+@media (prefers-reduced-motion: no-preference) {
+  .task-list[data-reordering] .task-button:not([data-dragging]) { transition: translate 160ms ease-out; }
+}
 .task-line { display: flex; align-items: center; gap: 7px; color: #cccfd7; font: 600 12px ui-monospace, Consolas, monospace; }
 .selected .task-line { color: #f6d198; }
 .task-title { max-width: 100%; padding-left: 14px; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
