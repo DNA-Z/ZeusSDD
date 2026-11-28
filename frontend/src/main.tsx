@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { CSSProperties, PointerEvent as ReactPointerEvent } from 'react'
 import { createRoot } from 'react-dom/client'
-import { ArrowUp, ChevronDown, ChevronRight, CircleAlert, FileCode2, FileText, Folder, GitBranch, GitCompareArrows, Link2, Maximize2, MessageSquare, Minimize2, Package, PanelRight, PanelRightDashed, Search, Settings, X, Zap } from 'lucide-react'
+import { ArrowUp, ChevronDown, ChevronRight, ChevronUp, CircleAlert, FileCode2, FileText, Folder, GitBranch, GitCompareArrows, Link2, Maximize2, MessageSquare, Minimize2, Package, PanelRight, PanelRightDashed, Search, Settings, X, Zap } from 'lucide-react'
 import TaskAgentChat from './TaskAgentChat'
 import './style.css'
 
@@ -18,6 +18,10 @@ type Task = {
 type Release = { id: string; sprint: string; current: boolean; tasks: Task[] }
 type Message = { id: number; text: string; createdAt: string }
 type ReviewMode = 'closed' | 'split' | 'maximized'
+
+function messageKey(message: Message) {
+  return `${message.id}:${message.createdAt}`
+}
 
 const statusNames: Record<Status, string> = { todo: 'Не взята в работу', progress: 'В работе', testing: 'На тестировании' }
 const dateFormat = new Intl.DateTimeFormat('ru', { hour: '2-digit', minute: '2-digit' })
@@ -99,10 +103,6 @@ function StatusDot({ status }: { status: Status }) {
   return <span className={`dot ${status}`} role="img" aria-label={statusNames[status]} title={statusNames[status]} />
 }
 
-type Theme = 'dark' | 'light'
-
-function SettingsMenu({ compact }: { compact: boolean }) {
-  const dialog = useRef<HTMLDialogElement>(null)
 type TaskDrag = {
   pointerId: number
   button: HTMLButtonElement
@@ -280,6 +280,10 @@ function TaskList({ release, matching, selected, selectTask }: {
   </div>
 }
 
+type Theme = 'dark' | 'light'
+
+function SettingsMenu({ compact }: { compact: boolean }) {
+  const dialog = useRef<HTMLDialogElement>(null)
   const [theme, setTheme] = useState<Theme | null>(null)
   const [error, setError] = useState('')
   const [saving, setSaving] = useState(false)
@@ -348,6 +352,7 @@ function App() {
   const [preferredSidebar, setSidebarWidth] = usePanelWidth('sidebar')
   const [preferredReview, setReviewWidth] = usePanelWidth('review')
   const [sidebarExpansionStart, setSidebarExpansionStart] = useState<number | undefined>(undefined)
+  const [headerCollapsed, setHeaderCollapsed] = useState(false)
   const sidebar = useRef<HTMLElement>(null)
   const lastExpandedSidebar = useRef<number | undefined>(undefined)
   const focusReleases = useRef(false)
@@ -461,60 +466,135 @@ function App() {
       <SettingsMenu compact={sidebarCollapsed} />
     </aside>
     {desktop && <PanelDivider panel="sidebar" width={sidebarWidth} min={collapsedSidebarWidth} max={maxSidebar} expandedMin={minSidebar} onResize={resizeSidebar} />}
-    {task && release ? <TaskWorkspace key={task.key} {...{ task, release, allTasks, selectTask, reviewMode, setReviewMode, reviewDivider }} /> :
+    {task && release ? <TaskWorkspace key={task.key}
+      {...{ task, release, allTasks, selectTask, reviewMode, setReviewMode, reviewDivider, desktop, headerCollapsed }}
+      toggleHeader={() => setHeaderCollapsed(collapsed => !collapsed)} /> :
       <main className="welcome">
         {error ? <><CircleAlert size={24} /><p role="alert">{error}</p><button className="secondary" onClick={() => setAttempt(value => value + 1)}>Повторить</button></> : <p>{loading ? 'Загружаем релизы…' : 'Выберите задачу в списке.'}</p>}
       </main>}
   </div>
 }
 
-function TaskWorkspace({ task, release, allTasks, selectTask, reviewMode, setReviewMode, reviewDivider }: {
+function TaskWorkspace({ task, release, allTasks, selectTask, reviewMode, setReviewMode, reviewDivider, desktop, headerCollapsed, toggleHeader }: {
   task: Task; release: Release; allTasks: Task[]; selectTask: (key: string) => void
   reviewMode: ReviewMode; setReviewMode: (value: ReviewMode) => void
-  reviewDivider: React.ReactNode
+  reviewDivider: React.ReactNode; desktop: boolean
+  headerCollapsed: boolean; toggleHeader: () => void
 }) {
-  const [messages, setMessages] = useState<Message[]>([])
+  const readStorageKey = `zeussdd.readTeamMessages.${task.key}`
+  const [messages, setMessages] = useState<Message[] | null>(null)
+  const [readMessages, setReadMessages] = useState<Set<string>>(() => {
+    try {
+      const saved: unknown = JSON.parse(localStorage.getItem(readStorageKey) ?? '[]')
+      return new Set(Array.isArray(saved) ? saved.filter((key): key is string => typeof key === 'string') : [])
+    } catch {
+      return new Set()
+    }
+  })
+  const [showTeamNotice, setShowTeamNotice] = useState(false)
   const [draft, setDraft] = useState('')
-  const [loading, setLoading] = useState(true)
   const [sending, setSending] = useState(false)
   const [loadError, setLoadError] = useState('')
   const [sendError, setSendError] = useState('')
   const [attempt, setAttempt] = useState(0)
   const [fileIndex, setFileIndex] = useState(0)
-  const [agentChat, setAgentChat] = useState(false)
+  const [agentChat, setAgentChat] = useState(true)
   const bottom = useRef<HTMLDivElement>(null)
+  const sentVersion = useRef(0)
+  const sendInFlight = useRef(false)
+  const teamTab = useRef<HTMLButtonElement>(null)
+  const focusTeamTab = useRef(false)
   const focusReviewToggle = useRef(false)
   const endpoint = `/api/tasks/${encodeURIComponent(task.key)}/messages`
+  const reviewCoversChat = reviewMode === 'maximized' || (reviewMode === 'split' && !desktop)
+  const teamChatOpen = !agentChat && !reviewCoversChat
+  const unreadCount = teamChatOpen ? 0 : messages?.filter(message => !readMessages.has(messageKey(message))).length ?? 0
+  const teamNoticeVisible = unreadCount > 0 && showTeamNotice
+  const initialLoadError = messages === null ? loadError : ''
+  const loading = messages === null && !initialLoadError
 
   useEffect(() => {
     const controller = new AbortController()
-    setLoading(true)
-    setLoadError('')
-    request<Message[]>(endpoint, { signal: controller.signal })
-      .then(setMessages)
-      .catch((error: Error) => { if (!controller.signal.aborted) setLoadError(error.message) })
-      .finally(() => { if (!controller.signal.aborted) setLoading(false) })
-    return () => controller.abort()
+    let timer: number | undefined
+
+    async function refreshMessages() {
+      const version = sentVersion.current
+      try {
+        if (sendInFlight.current) return
+        const latest = await request<Message[]>(endpoint, { signal: controller.signal, cache: 'no-store' })
+        if (controller.signal.aborted || sendInFlight.current || version !== sentVersion.current) return
+        setMessages(previous => {
+          const unchanged = previous?.length === latest.length && previous.every((message, index) => {
+            const incoming = latest[index]
+            return message.id === incoming.id && message.text === incoming.text && message.createdAt === incoming.createdAt
+          })
+          return unchanged ? previous : latest
+        })
+        setLoadError('')
+      } catch (error) {
+        if (!controller.signal.aborted) {
+          setLoadError(error instanceof Error ? error.message : 'Не удалось загрузить сообщения.')
+        }
+      } finally {
+        if (!controller.signal.aborted) timer = window.setTimeout(refreshMessages, 3000)
+      }
+    }
+
+    void refreshMessages()
+    return () => {
+      controller.abort()
+      window.clearTimeout(timer)
+    }
   }, [endpoint, attempt])
 
   useEffect(() => {
+    if (!teamChatOpen || !messages) return
+    setReadMessages(previous => {
+      const keys = messages.map(messageKey)
+      if (keys.length === previous.size && keys.every(key => previous.has(key))) return previous
+      return new Set(keys)
+    })
     if (messages.length) bottom.current?.scrollIntoView({ block: 'nearest' })
-  }, [messages])
+  }, [messages, teamChatOpen])
+
+  useEffect(() => {
+    try { localStorage.setItem(readStorageKey, JSON.stringify([...readMessages])) } catch { /* Storage can be disabled. */ }
+  }, [readMessages, readStorageKey])
+
+  useEffect(() => {
+    setShowTeamNotice(unreadCount > 0)
+    if (!unreadCount) return
+    const timeout = window.setTimeout(() => setShowTeamNotice(false), 8000)
+    return () => window.clearTimeout(timeout)
+  }, [unreadCount])
+
+  useEffect(() => {
+    if (!teamChatOpen || !focusTeamTab.current) return
+    focusTeamTab.current = false
+    teamTab.current?.focus()
+  }, [teamChatOpen])
 
   async function send() {
     const text = draft.trim()
-    if (!text || sending || loading || loadError) return
+    if (!text || sendInFlight.current || messages === null) return
+    sendInFlight.current = true
     setSending(true)
     setSendError('')
     try {
       const message = await request<Message>(endpoint, {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text }),
       })
-      setMessages(previous => [...previous, message])
+      sentVersion.current += 1
+      setReadMessages(previous => new Set(previous).add(messageKey(message)))
+      setMessages(previous => {
+        if (previous?.some(item => item.id === message.id)) return previous
+        return [...(previous ?? []), message].sort((a, b) => a.id - b.id)
+      })
       setDraft('')
     } catch (error) {
       setSendError(error instanceof Error ? error.message : 'Не удалось отправить сообщение.')
     } finally {
+      sendInFlight.current = false
       setSending(false)
     }
   }
@@ -526,10 +606,18 @@ function TaskWorkspace({ task, release, allTasks, selectTask, reviewMode, setRev
   const maximizeLabel = reviewMaximized ? 'Вернуть карточку задачи' : 'Развернуть изменения'
   const PanelIcon = reviewOpen ? PanelRight : PanelRightDashed
   const MaximizeIcon = reviewMaximized ? Minimize2 : Maximize2
+  const HeaderIcon = headerCollapsed ? ChevronDown : ChevronUp
+  const headerLabel = headerCollapsed ? 'Развернуть шапку задачи' : 'Свернуть шапку задачи'
 
   function toggleReview() {
     focusReviewToggle.current = true
     setReviewMode(reviewOpen ? 'closed' : 'split')
+  }
+
+  function openTeamNotice() {
+    focusTeamTab.current = true
+    setAgentChat(false)
+    if (reviewCoversChat) setReviewMode('closed')
   }
 
   const reviewToggle = <button type="button" className="icon-button review-toggle"
@@ -546,9 +634,15 @@ function TaskWorkspace({ task, release, allTasks, selectTask, reviewMode, setRev
   return <>
     <main className="workspace" id="workspace" hidden={reviewMaximized}>
       <div className="topbar"><span className="breadcrumb"><Folder size={16} /> <span>{release.id}</span><ChevronRight size={13} /><strong>{task.key}</strong></span>
-        {!reviewOpen && reviewToggle}
+        <div className="topbar-actions">
+          <button type="button" className="icon-button" aria-label={headerLabel} title={headerLabel}
+            aria-expanded={!headerCollapsed} aria-controls="task-header" onClick={toggleHeader}>
+            <HeaderIcon size={20} aria-hidden="true" />
+          </button>
+          {!reviewOpen && reviewToggle}
+        </div>
       </div>
-      <header className="task-header">
+      <header className="task-header" id="task-header" hidden={headerCollapsed}>
         <div className="task-meta"><span className="status-pill"><StatusDot status={task.status} />{statusNames[task.status]}</span><span className="kind">{task.kind}</span></div>
         <h1>{task.title}</h1>
         <div className="people">
@@ -568,15 +662,22 @@ function TaskWorkspace({ task, release, allTasks, selectTask, reviewMode, setRev
         })}
       </header>
       <div className="chat-switch" role="group" aria-label="Чат задачи">
-        <button type="button" className="secondary" aria-pressed={!agentChat} onClick={() => setAgentChat(false)}>Команда</button>
         <button type="button" className="secondary" aria-pressed={agentChat} onClick={() => setAgentChat(true)}>GigaCode</button>
+        <button type="button" className="secondary" ref={teamTab} aria-pressed={!agentChat}
+          aria-label={unreadCount ? `Команда, непрочитанных сообщений: ${unreadCount}` : undefined}
+          onClick={() => setAgentChat(false)}>
+          Команда
+          <span className="chat-unread-slot" aria-hidden="true">
+            {unreadCount > 0 && <span className="chat-unread">{unreadCount > 99 ? '99+' : unreadCount}</span>}
+          </span>
+        </button>
       </div>
       <section hidden={agentChat} className="conversation" aria-label="Чат команды">
         <article className="task-summary"><span className="summary-icon"><FileText size={20} /></span><div><h2>Описание задачи</h2><p>{task.summary}</p></div></article>
         {loading && <p className="muted">Загружаем чат…</p>}
-        {loadError && <div className="inline-error" role="alert">{loadError} <button className="text-button" onClick={() => setAttempt(value => value + 1)}>Повторить</button></div>}
-        {!loading && !loadError && messages.length === 0 && <div className="empty-chat"><MessageSquare size={17} /><span>Здесь появятся сообщения по задаче.</span></div>}
-        {messages.map(message => <article className="message" key={message.id}><header><strong>Вы</strong><time dateTime={message.createdAt}>{dateFormat.format(new Date(message.createdAt))}</time></header><p>{message.text}</p></article>)}
+        {initialLoadError && <div className="inline-error" role="alert">{initialLoadError} <button className="text-button" onClick={() => { setLoadError(''); setAttempt(value => value + 1) }}>Повторить</button></div>}
+        {messages?.length === 0 && <div className="empty-chat"><MessageSquare size={17} /><span>Здесь появятся сообщения по задаче.</span></div>}
+        {messages?.map(message => <article className="message" key={message.id}><header><strong>Вы</strong><time dateTime={message.createdAt}>{dateFormat.format(new Date(message.createdAt))}</time></header><p>{message.text}</p></article>)}
         <div ref={bottom} />
       </section>
       <form hidden={agentChat} className="composer" onSubmit={event => { event.preventDefault(); void send() }}>
@@ -585,11 +686,15 @@ function TaskWorkspace({ task, release, allTasks, selectTask, reviewMode, setRev
           <textarea aria-label="Сообщение по задаче" placeholder="Написать сообщение по задаче…" value={draft} readOnly={sending} maxLength={4000} onChange={event => setDraft(event.target.value)} onKeyDown={event => {
             if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void send() }
           }} />
-          <div className="composer-actions"><span>Shift + Enter для новой строки</span><button className="send" aria-label="Отправить сообщение" title="Отправить сообщение" disabled={!draft.trim() || sending || loading || Boolean(loadError)}><ArrowUp size={19} /></button></div>
+          <div className="composer-actions"><span>Shift + Enter для новой строки</span><button className="send" aria-label="Отправить сообщение" title="Отправить сообщение" disabled={!draft.trim() || sending || messages === null}><ArrowUp size={19} /></button></div>
         </div>
       </form>
       <TaskAgentChat taskKey={task.key} active={agentChat} />
     </main>
+    <div className="team-chat-notice" data-visible={teamNoticeVisible || undefined}>
+      <p role="status">{teamNoticeVisible && `Непрочитанные сообщения в чате «Команда» · ${unreadCount}`}</p>
+      {teamNoticeVisible && <button type="button" className="secondary" onClick={openTeamNotice}>Открыть чат</button>}
+    </div>
     {reviewOpen && <>{reviewDivider}
       {!reviewMaximized && <button className="review-backdrop" aria-label="Закрыть панель изменений" tabIndex={-1} onClick={toggleReview} />}
       <aside className={reviewMaximized ? 'review maximized' : 'review'} id="review" aria-label="Изменения в задаче">
